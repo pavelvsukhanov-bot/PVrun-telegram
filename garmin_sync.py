@@ -49,13 +49,9 @@ def login(tokenstore: str | None = None) -> Garmin:
     if not email or not password:
         sys.exit("Set GARMIN_EMAIL and GARMIN_PASSWORD in .env file")
 
-    kwargs = {"prompt_mfa": _prompt_mfa}
-    if tokenstore:
-        kwargs["tokenstore"] = tokenstore
-
-    client = Garmin(email, password, **kwargs)
+    client = Garmin(email, password, prompt_mfa=_prompt_mfa)
     try:
-        client.login()
+        client.login(tokenstore=tokenstore)
     except GarminConnectAuthenticationError as exc:
         sys.exit(f"Authentication failed: {exc}")
     except GarminConnectConnectionError as exc:

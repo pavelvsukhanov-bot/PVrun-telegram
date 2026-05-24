@@ -38,8 +38,8 @@ def main() -> None:
     state    = load_state()
     sent_ids = set(state.get("sent_ids", []))
 
-    TOKEN_DIR.mkdir(exist_ok=True)
-    client = login(tokenstore=str(TOKEN_DIR))
+    # tokenstore=None → login() reads GARMINTOKENS env var automatically
+    client = login()
 
     end   = date.today()
     start = end - timedelta(days=3)   # look back 3 days to catch slow syncs
