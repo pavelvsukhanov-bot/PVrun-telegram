@@ -3,18 +3,15 @@ name: Garmin → Telegram
 on:
   schedule:
     - cron: '*/30 * * * *'   # every 30 minutes
-  workflow_dispatch:           # manual trigger (use for first run with MFA)
-    inputs:
-      mfa_code:
-        description: 'Garmin MFA code (only needed for first run)'
-        required: false
-        default: ''
+  workflow_dispatch:           # manual trigger
 
 jobs:
   sync:
     runs-on: ubuntu-latest
     permissions:
-      contents: write          # needed to commit state.json back to repo
+      contents: write
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
     steps:
       - name: Checkout repo
@@ -27,26 +24,17 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: Restore Garmin token cache
-        uses: actions/cache@v4
-        with:
-          path: garmin_tokens
-          # New cache key each run so refreshed tokens are always saved
-          key: garmin-tokens-${{ github.run_id }}
-          restore-keys: |
-            garmin-tokens-
-
       - name: Install dependencies
         run: pip install -r requirements.txt
 
       - name: Run sync
         run: python check_new.py
         env:
-          GARMIN_EMAIL:         ${{ secrets.GARMIN_EMAIL }}
-          GARMIN_PASSWORD:      ${{ secrets.GARMIN_PASSWORD }}
-          GARMIN_MFA_CODE:      ${{ inputs.mfa_code }}
-          TELEGRAM_BOT_TOKEN:   ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          TELEGRAM_CHAT_ID:     ${{ secrets.TELEGRAM_CHAT_ID }}
+          GARMIN_EMAIL:        ${{ secrets.GARMIN_EMAIL }}
+          GARMIN_PASSWORD:     ${{ secrets.GARMIN_PASSWORD }}
+          GARMINTOKENS:        ${{ secrets.GARMINTOKENS }}
+          TELEGRAM_BOT_TOKEN:  ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID:    ${{ secrets.TELEGRAM_CHAT_ID }}
 
       - name: Commit updated state.json
         run: |
