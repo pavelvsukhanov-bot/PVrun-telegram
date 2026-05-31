@@ -1,0 +1,64 @@
+name: Monthly Running Report
+
+on:
+  schedule:
+    - cron: '0 6 1 * *'   # 1-е число каждого месяца в 8:00 по Мадриду (UTC+2)
+  workflow_dispatch:        # ручной запуск для тестирования
+    inputs:
+      test_mode:
+        description: 'Test mode — use current month data'
+        type: boolean
+        default: false
+
+jobs:
+  report:
+    runs-on: ubuntu-latest
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Restore Garmin tokens
+        run: |
+          mkdir -p garmin_tokens
+          python - <<'EOF'
+          import base64, json, os
+          from pathlib import Path
+          raw = os.environ.get("GARMIN_TOKENS", "")
+          if raw:
+              files = json.loads(base64.b64decode(raw))
+              for name, content in files.items():
+                  Path(f"garmin_tokens/{name}").write_bytes(base64.b64decode(content))
+              print(f"Restored {len(files)} token file(s)")
+          EOF
+        env:
+          GARMIN_TOKENS: ${{ secrets.GARMIN_TOKENS }}
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Sync last 35 days from Garmin
+        run: python garmin_sync.py --days 35
+        env:
+          GARMIN_EMAIL:    ${{ secrets.GARMIN_EMAIL }}
+          GARMIN_PASSWORD: ${{ secrets.GARMIN_PASSWORD }}
+          GARMINTOKENS:    ${{ secrets.GARMINTOKENS }}
+
+      - name: Generate and send monthly report
+        run: |
+          if [ "${{ inputs.test_mode }}" = "true" ]; then
+            python monthly_report.py --test
+          else
+            python monthly_report.py
+          fi
+        env:
+          TELEGRAM_BOT_TOKEN:  ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID:    ${{ secrets.TELEGRAM_CHAT_ID }}
+          ANTHROPIC_API_KEY:   ${{ secrets.ANTHROPIC_API_KEY }}
