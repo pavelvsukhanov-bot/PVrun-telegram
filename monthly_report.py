@@ -11,7 +11,7 @@ import argparse
 import os
 from datetime import date, timedelta
 
-import anthropic
+import requests
 from dotenv import load_dotenv
 
 from db import get_conn
@@ -142,11 +142,9 @@ def technique_emoji(metric: str, value: float | None) -> str:
 # ── AI analysis ───────────────────────────────────────────────────────────────
 
 def generate_ai_analysis(stats: dict, month_name: str) -> str:
-    api_key = os.environ.get("ANTHROPIC_API_KEY")
+    api_key = os.environ.get("GROQ_API_KEY")
     if not api_key:
-        return "⚠️ ANTHROPIC_API_KEY не задан — анализ недоступен."
-
-    client = anthropic.Anthropic(api_key=api_key)
+        return "⚠️ GROQ_API_KEY не задан — анализ недоступен."
 
     prompt = f"""Ты опытный тренер по бегу. Проанализируй тренировочный месяц бегуна,
 который готовится к марафону, и дай конкретные рекомендации.
@@ -183,12 +181,19 @@ def generate_ai_analysis(stats: dict, month_name: str) -> str:
 
 Отвечай на русском языке. Будь конкретным и практичным."""
 
-    message = client.messages.create(
-        model="claude-haiku-4-5",
-        max_tokens=600,
-        messages=[{"role": "user", "content": prompt}],
+    resp = requests.post(
+        "https://api.groq.com/openai/v1/chat/completions",
+        headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+        json={
+            "model": "llama-3.3-70b-versatile",
+            "messages": [{"role": "user", "content": prompt}],
+            "max_tokens": 700,
+        },
+        timeout=30,
     )
-    return message.content[0].text.strip()
+    if not resp.ok:
+        return f"⚠️ Groq API недоступен ({resp.status_code}): {resp.text[:150]}"
+    return resp.json()["choices"][0]["message"]["content"].strip()
 
 
 # ── Report builder ────────────────────────────────────────────────────────────
@@ -235,7 +240,7 @@ def main() -> None:
     args = parser.parse_args()
 
     start, end, month, year = get_month_range(args.test)
-    print(f"Generating report for {MONTHS_RU[month]} {year} ({start} → {end})...")
+    print(f"Generating report for {MONTHS_RU[month]} {year} ({start} - {end})...")
 
     rows = fetch_month_runs(start, end)
     if not rows:
@@ -246,11 +251,7 @@ def main() -> None:
     stats = compute_stats(rows)
     report = build_report(stats, month, year)
 
-    print("\n--- Preview ---")
-    # Strip HTML tags for console preview
-    import re
-    print(re.sub(r"<[^>]+>", "", report))
-    print("--- Sending to Telegram ---")
+    print("Sending to Telegram...")
     tg_send(report)
     print("Done.")
 
