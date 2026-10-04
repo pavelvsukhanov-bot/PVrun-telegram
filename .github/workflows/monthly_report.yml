@@ -13,33 +13,15 @@ on:
 jobs:
   report:
     runs-on: ubuntu-latest
-    env:
-      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
     steps:
       - name: Checkout repo
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v7
         with:
           python-version: '3.13'   # garminconnect >=0.3.3 requires Python >=3.12
-
-      - name: Restore Garmin tokens
-        run: |
-          mkdir -p garmin_tokens
-          python - <<'EOF'
-          import base64, json, os
-          from pathlib import Path
-          raw = os.environ.get("GARMIN_TOKENS", "")
-          if raw:
-              files = json.loads(base64.b64decode(raw))
-              for name, content in files.items():
-                  Path(f"garmin_tokens/{name}").write_bytes(base64.b64decode(content))
-              print(f"Restored {len(files)} token file(s)")
-          EOF
-        env:
-          GARMIN_TOKENS: ${{ secrets.GARMIN_TOKENS }}
 
       - name: Install dependencies
         run: pip install -r requirements.txt

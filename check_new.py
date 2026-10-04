@@ -3,7 +3,7 @@ One-shot script for GitHub Actions.
 Checks Garmin for new runs → sends to Telegram → saves state.
 
 State (sent activity IDs) is kept in state.json (committed to the repo).
-Garmin OAuth tokens are cached in ./garmin_tokens/ (GitHub Actions cache).
+Garmin tokens come from the GARMINTOKENS env var (GitHub secret).
 """
 
 import json
@@ -15,12 +15,11 @@ from pathlib import Path
 from dotenv import load_dotenv
 
 from garmin_sync import fetch_activities, is_run, login, parse_activity
-from tg_poller import format_run, tg_send
+from telegram import format_run, tg_send
 
 load_dotenv()
 
 STATE_FILE  = Path(__file__).parent / "state.json"
-TOKEN_DIR   = Path(__file__).parent / "garmin_tokens"
 
 # Wide enough that runs missed during an outage (e.g. expired tokens) are sent
 # once sync recovers; state.json prevents duplicates.

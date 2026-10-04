@@ -17,7 +17,7 @@ import requests
 from dotenv import load_dotenv
 
 from db import get_conn
-from tg_poller import tg_send
+from telegram import tg_send
 
 load_dotenv()
 
@@ -79,7 +79,7 @@ def compute_stats(rows) -> dict | None:
     v_oscs   = [r["avg_vert_osc_cm"] for r in rows]
     v_rats   = [r["avg_vert_ratio_pct"] for r in rows]
 
-    sorted_by_pace = sorted([p for p in paces if p], )
+    sorted_by_pace = sorted(p for p in paces if p)
 
     return {
         "total_runs":    len(rows),
@@ -118,27 +118,14 @@ def technique_emoji(metric: str, value: float | None) -> str:
     """Returns ✅ / ⚠️ / ❌ based on marathon training guidelines."""
     if value is None:
         return ""
-    thresholds = {
-        "cadence":    [(170, "✅"), (160, "⚠️"), (0, "❌")],
-        "gct":        [(0, "✅"), (250, "⚠️"), (280, "❌")],   # lower is better
-        "vert_osc":   [(0, "✅"), (8.0, "⚠️"), (10.0, "❌")],  # lower is better
-        "vert_ratio": [(0, "✅"), (8.0, "⚠️"), (10.0, "❌")],  # lower is better
-    }
-    if metric == "cadence":
-        for threshold, emoji in thresholds["cadence"]:
-            if value >= threshold:
-                return emoji
-    elif metric in ("gct", "vert_osc", "vert_ratio"):
-        # lower is better: reverse logic
-        limits = {"gct": (250, 280), "vert_osc": (8.0, 10.0), "vert_ratio": (8.0, 10.0)}
-        low, high = limits[metric]
-        if value < low:
-            return "✅"
-        elif value < high:
-            return "⚠️"
-        else:
-            return "❌"
-    return ""
+    if metric == "cadence":  # higher is better
+        return "✅" if value >= 170 else "⚠️" if value >= 160 else "❌"
+    # lower is better: (ok below, warning below)
+    limits = {"gct": (250, 280), "vert_osc": (8.0, 10.0), "vert_ratio": (8.0, 10.0)}
+    if metric not in limits:
+        return ""
+    low, high = limits[metric]
+    return "✅" if value < low else "⚠️" if value < high else "❌"
 
 
 # ── AI analysis ───────────────────────────────────────────────────────────────

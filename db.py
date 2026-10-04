@@ -31,7 +31,6 @@ def init_db() -> None:
                 avg_vert_osc_cm      REAL,
                 avg_vert_ratio_pct   REAL,
                 training_effect      REAL,
-                tg_sent              INTEGER DEFAULT 0,
                 raw_json             TEXT
             )
         """)
@@ -42,7 +41,6 @@ def init_db() -> None:
             "avg_stride_length_cm": "REAL",
             "avg_vert_osc_cm":      "REAL",
             "avg_vert_ratio_pct":   "REAL",
-            "tg_sent":              "INTEGER DEFAULT 0",
         }
         for col, col_type in new_cols.items():
             if col not in existing:

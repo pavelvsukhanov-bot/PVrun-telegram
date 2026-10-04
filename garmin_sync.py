@@ -80,7 +80,6 @@ def login(tokenstore: str | None = None) -> Garmin:
 def is_run(activity: dict) -> bool:
     type_info = activity.get(ACTIVITY_TYPE_KEY, {})
     type_key = type_info.get("typeKey", "").lower()
-    parent_key = type_info.get("parentTypeId", "")
     return type_key in RUNNING_TYPE_IDS or "run" in type_key
 
 

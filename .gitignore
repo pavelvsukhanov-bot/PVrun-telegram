@@ -3,4 +3,3 @@ garmin.db
 garmin_tokens/
 __pycache__/
 *.pyc
-resend_last.py
