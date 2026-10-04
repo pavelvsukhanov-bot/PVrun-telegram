@@ -15,11 +15,25 @@ import time
 from datetime import date, timedelta
 
 from dotenv import load_dotenv
-from garminconnect import Garmin, GarminConnectConnectionError, GarminConnectAuthenticationError
+from garminconnect import (
+    Garmin,
+    GarminConnectAuthenticationError,
+    GarminConnectConnectionError,
+    GarminConnectTooManyRequestsError,
+)
 
 from db import get_conn, init_db
 
 load_dotenv()
+
+# Exit code for "tokens rejected / MFA needed / rate-limited": retrying won't help,
+# a human must refresh tokens. CI uses it to alert and stop hammering Garmin.
+EXIT_AUTH = 2
+
+
+def _auth_exit(msg: str) -> None:
+    print(f"AUTH ERROR: {msg}", file=sys.stderr)
+    sys.exit(EXIT_AUTH)
 
 RUNNING_TYPE_IDS = {
     "running",
@@ -40,6 +54,8 @@ def _prompt_mfa() -> str:
     if code:
         print(f"Using MFA code from environment.")
         return code
+    if os.environ.get("CI"):
+        _auth_exit("Garmin requires MFA, but nobody can enter it in CI")
     return input("Enter MFA/2FA code from your Garmin authenticator app: ").strip()
 
 
@@ -53,7 +69,9 @@ def login(tokenstore: str | None = None) -> Garmin:
     try:
         client.login(tokenstore=tokenstore)
     except GarminConnectAuthenticationError as exc:
-        sys.exit(f"Authentication failed: {exc}")
+        _auth_exit(f"Authentication failed: {exc}")
+    except GarminConnectTooManyRequestsError as exc:
+        _auth_exit(f"Rate limited by Garmin: {exc}")
     except GarminConnectConnectionError as exc:
         sys.exit(f"Connection error: {exc}")
     return client

@@ -10,6 +10,7 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+      actions: write   # lets the alert step read run history and disable this workflow
     env:
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
@@ -28,7 +29,13 @@ jobs:
         run: pip install -r requirements.txt
 
       - name: Run sync
-        run: python check_new.py
+        id: sync
+        run: |
+          set +e
+          python check_new.py
+          code=$?
+          echo "exit_code=$code" >> "$GITHUB_OUTPUT"
+          exit $code
         env:
           GARMIN_EMAIL:        ${{ secrets.GARMIN_EMAIL }}
           GARMIN_PASSWORD:     ${{ secrets.GARMIN_PASSWORD }}
@@ -36,7 +43,45 @@ jobs:
           TELEGRAM_BOT_TOKEN:  ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID:    ${{ secrets.TELEGRAM_CHAT_ID }}
 
+      # Exit code 2 = Garmin rejected tokens / wants MFA / rate-limited.
+      # Retrying only prolongs Garmin's 429 block, so alert once and stop the schedule.
+      # Other failures: alert only on the first failure after a success (no spam).
+      - name: Alert on failure
+        if: failure()
+        env:
+          GH_TOKEN:            ${{ github.token }}
+          GH_REPO:             ${{ github.repository }}
+          EXIT_CODE:           ${{ steps.sync.outputs.exit_code }}
+          RUN_URL:             ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          TELEGRAM_BOT_TOKEN:  ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID:    ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          send() {
+            curl -s -o /dev/null -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+              --data-urlencode "chat_id=${TELEGRAM_CHAT_ID}" --data-urlencode "text=$1"
+          }
+          if [ "$EXIT_CODE" = "2" ]; then
+            send "⚠️ Garmin не пускает: токены отклонены (или нужен MFA / лимит 429).
+          Автосинк пробежек ОТКЛЮЧЁН, чтобы не продлевать блокировку.
+
+          Что сделать:
+          1. python setup_tokens.py (введи код MFA)
+          2. Строку токена → секрет GARMINTOKENS на GitHub
+          3. Actions → «Garmin → Telegram» → Enable workflow → Run workflow
+
+          Лог: ${RUN_URL}"
+            gh workflow disable garmin_sync.yml
+          else
+            prev=$(gh run list --workflow garmin_sync.yml --status completed --limit 1 --json conclusion -q '.[0].conclusion')
+            if [ "$prev" = "success" ]; then
+              send "⚠️ Синк Garmin → Telegram упал (код ${EXIT_CODE:-?}). Следующие прогоны попробуют снова; это сообщение — один раз на серию сбоев.
+          Лог: ${RUN_URL}"
+            fi
+          fi
+
+      # always(): if some runs were sent before a failure, they must still be recorded
       - name: Commit updated state.json
+        if: always()
         run: |
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"

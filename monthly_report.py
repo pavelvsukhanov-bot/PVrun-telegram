@@ -8,7 +8,9 @@ Usage:
 """
 
 import argparse
+import html
 import os
+import sys
 from datetime import date, timedelta
 
 import requests
@@ -225,8 +227,9 @@ def build_report(stats: dict, month: int, year: int) -> str:
         "🤖 <b>Анализ и рекомендации</b>",
     ]
 
+    # Escape: model output may contain "<" (e.g. "<250 мс"), which breaks Telegram HTML parsing
     ai_text = generate_ai_analysis(stats, month_name)
-    lines.append(ai_text)
+    lines.append(html.escape(ai_text, quote=False))
 
     return "\n".join(lines)
 
@@ -245,14 +248,16 @@ def main() -> None:
     rows = fetch_month_runs(start, end)
     if not rows:
         print("No runs found for this period.")
-        tg_send(f"📊 Отчёт за {MONTHS_RU_GEN[month]} {year}: пробежек не найдено.")
+        if not tg_send(f"📊 Отчёт за {MONTHS_RU_GEN[month]} {year}: пробежек не найдено."):
+            sys.exit("Failed to send report to Telegram")
         return
 
     stats = compute_stats(rows)
     report = build_report(stats, month, year)
 
     print("Sending to Telegram...")
-    tg_send(report)
+    if not tg_send(report):
+        sys.exit("Failed to send report to Telegram")
     print("Done.")
 
 

@@ -11,6 +11,7 @@ Required .env variables:
     TELEGRAM_CHAT_ID
 """
 
+import html
 import os
 import sys
 import time
@@ -29,16 +30,18 @@ POLL_INTERVAL = 15 * 60  # seconds
 
 # ── Telegram helpers ────────────────────────────────────────────────────────
 
-def tg_send(text: str) -> None:
+def tg_send(text: str) -> bool:
+    """Returns True if Telegram accepted the message."""
     token = os.environ.get("TELEGRAM_BOT_TOKEN")
     chat_id = os.environ.get("TELEGRAM_CHAT_ID")
     if not token or not chat_id:
         print("[TG] TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID not set — skipping send")
-        return
+        return False
     url = f"https://api.telegram.org/bot{token}/sendMessage"
     resp = requests.post(url, json={"chat_id": chat_id, "text": text, "parse_mode": "HTML"}, timeout=10)
     if not resp.ok:
         print(f"[TG] Send failed: {resp.status_code} {resp.text}")
+    return resp.ok
 
 
 def format_run(row) -> str:
@@ -61,7 +64,7 @@ def format_run(row) -> str:
 
     lines = [
         f"<b>Пробежка  {row['start_time'][:10]}</b>",
-        f"{row['name']}",
+        f"{html.escape(row['name'] or '', quote=False)}",
         "",
         f"Дистанция:       {dist_km:.2f} км",
         f"Время:           {duration_str}",
@@ -114,7 +117,8 @@ def send_unsent() -> None:
     rows = get_unsent_runs()
     for row in rows:
         text = format_run(row)
-        tg_send(text)
+        if not tg_send(text):
+            continue  # stays unsent, retried next cycle
         mark_sent(row["activity_id"])
         print(f"  Sent to Telegram: {row['start_time'][:10]} {row['name']}")
 

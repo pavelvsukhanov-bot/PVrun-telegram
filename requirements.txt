@@ -1,3 +1,5 @@
-garminconnect>=0.2.0
+# Pinned: Garmin auth changes often between releases. Upgrade deliberately
+# and re-run setup_tokens.py locally before bumping this.
+garminconnect==0.3.17
 python-dotenv>=1.0.0
 requests>=2.31.0

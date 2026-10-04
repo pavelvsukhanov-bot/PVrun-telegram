@@ -7,6 +7,7 @@ Garmin OAuth tokens are cached in ./garmin_tokens/ (GitHub Actions cache).
 """
 
 import json
+import sys
 import time
 from datetime import date, timedelta
 from pathlib import Path
@@ -20,6 +21,10 @@ load_dotenv()
 
 STATE_FILE  = Path(__file__).parent / "state.json"
 TOKEN_DIR   = Path(__file__).parent / "garmin_tokens"
+
+# Wide enough that runs missed during an outage (e.g. expired tokens) are sent
+# once sync recovers; state.json prevents duplicates.
+LOOKBACK_DAYS = 10
 
 
 def load_state() -> dict:
@@ -42,13 +47,14 @@ def main() -> None:
     client = login()
 
     end   = date.today()
-    start = end - timedelta(days=3)   # look back 3 days to catch slow syncs
+    start = end - timedelta(days=LOOKBACK_DAYS)
     activities = fetch_activities(client, start, end)
     runs = [a for a in activities if is_run(a)]
 
-    print(f"Found {len(runs)} run(s) in the last 3 days.")
+    print(f"Found {len(runs)} run(s) in the last {LOOKBACK_DAYS} days.")
 
     new_count = 0
+    failed = 0
     for act in runs:
         row = parse_activity(act)
         if row["activity_id"] in sent_ids:
@@ -57,16 +63,22 @@ def main() -> None:
 
         print(f"  New run: {row['start_time'][:10]}  {(row['distance_m'] or 0)/1000:.2f} km  {row['name']}")
         text = format_run(row)
-        tg_send(text)
+        if not tg_send(text):
+            failed += 1  # not marked as sent → retried next run
+            continue
         sent_ids.add(row["activity_id"])
         new_count += 1
         time.sleep(1)
 
     print(f"Sent {new_count} new run(s) to Telegram.")
 
-    # Keep last 200 IDs so the file doesn't grow forever
-    state["sent_ids"] = list(sent_ids)[-200:]
+    # Garmin IDs grow over time: sorting keeps the file stable between runs
+    # (no noise commits) and the cap drops the oldest IDs, not random ones.
+    state["sent_ids"] = sorted(sent_ids, key=int)[-200:]
     save_state(state)
+
+    if failed:
+        sys.exit(f"{failed} run(s) failed to send to Telegram")
 
 
 if __name__ == "__main__":

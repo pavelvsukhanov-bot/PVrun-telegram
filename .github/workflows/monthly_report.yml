@@ -62,3 +62,15 @@ jobs:
           TELEGRAM_BOT_TOKEN:  ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID:    ${{ secrets.TELEGRAM_CHAT_ID }}
           GROQ_API_KEY:        ${{ secrets.GROQ_API_KEY }}
+
+      - name: Alert on failure
+        if: failure()
+        env:
+          RUN_URL:             ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          TELEGRAM_BOT_TOKEN:  ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID:    ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          curl -s -o /dev/null -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+            --data-urlencode "chat_id=${TELEGRAM_CHAT_ID}" \
+            --data-urlencode "text=⚠️ Месячный отчёт не отправлен. Если упал шаг синка — скорее всего, протухли токены Garmin: python setup_tokens.py → секрет GARMINTOKENS, затем Actions → Monthly Running Report → Run workflow.
+          Лог: ${RUN_URL}"
