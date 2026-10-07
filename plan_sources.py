@@ -19,6 +19,7 @@ import tredict
 
 TZ = ZoneInfo("Europe/Madrid")
 
+PHASE_RU = {"BASE": "база", "BUILD": "развитие", "PEAK": "пик", "TAPER": "подводка", "TARGET_EVENT_DAY": "старт"}
 READINESS_RU = {"PRIME": "отличная", "HIGH": "высокая", "MODERATE": "средняя", "LOW": "низкая", "POOR": "очень низкая"}
 HRV_STATUS_RU = {"BALANCED": "в норме", "UNBALANCED": "нестабильна", "LOW": "низкая", "POOR": "очень низкая"}
 
@@ -40,6 +41,9 @@ class Snapshot:
     acwr: float | None = None
     context: list[str] = field(default_factory=list)     # extra facts for the LLM
     lt_hr: int | None = None                             # lactate threshold HR
+    plan_info: str = ""                                  # active Garmin plan today, e.g. "база, нед. 1/25"
+    plan_today: list[dict] = field(default_factory=list) # Garmin plan sessions for today (empty = rest)
+    races: list[dict] = field(default_factory=list)      # race events around today: date, title, km
 
 
 def fmt_hm(seconds: float) -> str:
@@ -188,7 +192,69 @@ def garmin_snapshot(today: date) -> Snapshot:
         snap.lt_hr = lt.get("heartRate")
     except Exception as exc:
         print(f"Garmin lactate threshold unavailable: {exc!r}")
+    try:
+        snap.plan_info, snap.plan_today = garmin_plan(c, today)
+    except Exception as exc:
+        print(f"Garmin training plan unavailable: {exc!r}")
+    try:
+        snap.races = garmin_races(c, today)
+    except Exception as exc:
+        print(f"Garmin race events unavailable: {exc!r}")
     return snap
+
+
+def garmin_plan(c, today: date) -> tuple[str, list[dict]]:
+    """Today's sessions of the active Garmin adaptive plan ("" if no plan covers today).
+
+    Adaptive plan sessions are not in Garmin's calendar API, but the plan's
+    taskList carries the coming days.
+    """
+    plans = [p for p in (c.get_training_plans() or {}).get("trainingPlanList", [])
+             if p.get("trainingPlanCategory") == "FBT_ADAPTIVE"
+             and (p.get("trainingStatus") or {}).get("statusKey") != "Completed"]
+    if not plans:
+        return "", []
+    plan = c.get_adaptive_training_plan_by_id(max(plans, key=lambda p: p.get("createDate") or "")["trainingPlanId"])
+    d = today.isoformat()
+    if not plan.get("startDate", "")[:10] <= d <= plan.get("endDate", "")[:10]:
+        return "", []
+    phase = next((ph.get("trainingPhase", "") for ph in plan.get("adaptivePlanPhases") or []
+                  if ph.get("startDate", "") <= d <= ph.get("endDate", "")), "")
+    week = (today - date.fromisoformat(plan["startDate"][:10])).days // 7 + 1
+    info = f"{PHASE_RU.get(phase, phase.lower())}, нед. {week}/{plan.get('durationInWeeks')}"
+    tasks = [t for t in plan.get("taskList") or [] if t.get("calendarDate") == d]
+    if not tasks:
+        return "", []   # the taskList only covers the coming days: no data is not a rest day
+    sessions = []
+    for t in tasks:
+        w = t.get("taskWorkout") or {}
+        if t.get("calendarDate") != d or not w.get("workoutName") or w.get("restDay"):
+            continue
+        sessions.append({
+            "name":  w["workoutName"],
+            "desc":  w.get("workoutDescription") or "",
+            "sport": (w.get("sportType") or {}).get("sportTypeKey", ""),
+            "label": w.get("trainingEffectLabel") or "",
+            "long":  bool(t.get("longWkt")),
+            "min":   round((w.get("estimatedDurationInSecs") or 0) / 60),
+        })
+    return info, sessions
+
+
+def garmin_races(c, today: date) -> list[dict]:
+    """Race events from the Garmin calendar, from 15 days ago to 2 days ahead."""
+    months = {(d.year, d.month) for d in (today - timedelta(days=15), today, today + timedelta(days=2))}
+    races = {}
+    for y, m in months:
+        for i in (c.get_scheduled_workouts(y, m) or {}).get("calendarItems", []):
+            if i.get("itemType") == "event" and i.get("isRace") and i.get("date"):
+                day = date.fromisoformat(i["date"])
+                if -15 <= (day - today).days <= 2:
+                    races[(day, i.get("title"))] = {
+                        "date": day, "title": i.get("title") or "старт",
+                        "km": ((i.get("completionTarget") or {}).get("value") or 0) / 1000,
+                    }
+    return sorted(races.values(), key=lambda r: r["date"])
 
 
 # ── Tredict (fallback) ───────────────────────────────────────────────────────

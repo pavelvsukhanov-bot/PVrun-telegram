@@ -58,7 +58,8 @@ MONTHS_GEN = ["января", "февраля", "марта", "апреля", "�
 @dataclass
 class Readiness:
     level: str = "green"
-    reasons: list[str] = field(default_factory=list)
+    reasons: list[str] = field(default_factory=list)   # why the day is yellow/red
+    limits: list[str] = field(default_factory=list)    # why intensity is off (bot's own schedule rules)
     quality_ok: bool = True     # threshold / VO2 session allowed
     long_ok: bool = False       # long run allowed
     day_off: bool = False       # scheduled rest day
@@ -70,7 +71,7 @@ class Readiness:
 
     def no_quality(self, reason: str) -> None:
         self.quality_ok = False
-        self.reasons.append(reason)
+        self.limits.append(reason)
 
 
 def is_hard(run: dict) -> bool:
@@ -118,19 +119,27 @@ def assess(today: date, snap: Snapshot) -> tuple[Readiness, list[str]]:
     month_km = sum(x["km"] for x in past if x["date"] >= today - timedelta(28)) / 4
     lines.append(f"Бег за 7 дней: {week_km:.0f} км (в среднем {month_km:.0f} км/нед)")
 
-    # Race recovery window
-    races = [x for x in past if x["km"] >= RACE_KM and (today - x["date"]).days <= RACE_RECOVERY_DAYS]
+    # Race recovery window: any race-length run, or a run of >=15 km on a race day from the calendar
+    race_days = {x["date"] for x in snap.races}
+    races = [x for x in past if (x["km"] >= RACE_KM or (x["date"] in race_days and x["km"] >= 15))
+             and (today - x["date"]).days <= RACE_RECOVERY_DAYS]
     if races:
-        days = (today - races[-1]["date"]).days
-        race = "марафона" if races[-1]["km"] >= 42 else f"забега {races[-1]['km']:.0f} км"
-        if days <= 2:
+        last = races[-1]
+        days = (today - last["date"]).days
+        race = "марафона" if last["km"] >= 42 else "полумарафона" if last["km"] >= 20 else f"забега {last['km']:.0f} км"
+        rest, easy, no_quality = (2, 7, 14) if last["km"] >= RACE_KM else (1, 3, 7)   # (days) marathon vs half
+        if days <= rest:
             r.cap("red", f"{days} дн. после {race} — отдых")
             r.quality_ok = False
-        elif days <= 7:
+        elif days <= easy:
             r.cap("yellow", f"{days} дн. после {race} — восстановление")
             r.quality_ok = False
-        else:
+        elif days <= no_quality:
             r.no_quality(f"{days} дн. после {race} — интенсивность рано")
+    for race in snap.races:
+        if race["date"] == today + timedelta(1):
+            r.cap("yellow", f"завтра старт: {race['title']}")
+            r.quality_ok = False
 
     # Session spacing. Long runs are their own weekly key session, not one of the 2 quality ones
     hard = [x for x in past if (today - x["date"]).days <= 7 and is_hard(x) and not is_long(x)]
@@ -211,7 +220,7 @@ def build_prompt(today: date, r: Readiness, metrics: list[str], z: dict, snap: S
 
 Состояние после сна (решение по готовности уже принято правилами, НЕ повышай интенсивность):
 {chr(10).join('- ' + m for m in metrics)}
-Готовность: {r.level}. Причины ограничений: {'; '.join(r.reasons) or 'нет'}.
+Готовность: {r.level}. Причины ограничений: {'; '.join(r.reasons + r.limits) or 'нет'}.
 {f"Дополнительно ({snap.source}):{chr(10)}{context}" if context else ""}
 
 Пульсовые зоны: восстановление до {z['recovery_max']}, лёгкая {z['easy'][0]}–{z['easy'][1]},
@@ -310,6 +319,45 @@ def esc(s: str) -> str:
     return html.escape(s, quote=False)
 
 
+# Garmin training-effect labels of plan sessions that are fine on an easy day
+EASY_PLAN_LABELS = {"AEROBIC_BASE", "RECOVERY", "UNKNOWN", ""}
+
+
+def watch_button(code: str) -> dict:
+    # The whole workout travels in the button (<=64 bytes): nothing is stored between steps
+    return {"inline_keyboard": [[{"text": "⌚ Отправить на часы", "callback_data": f"W:{code}"}]]}
+
+
+def plan_lines(snap: Snapshot, r: Readiness, z: dict) -> tuple[list[str], dict | None]:
+    """Today's Garmin plan, passed through the recovery gate.
+
+    The plan (already on the watch) sets the schedule; the bot only steps in
+    when recovery says so: a hard or long session on a yellow day is swapped
+    for an easy run (with a watch button), a red day cancels everything.
+    """
+    lines = [f"📋 <b>По плану Garmin</b> ({esc(snap.plan_info)})"]
+    keyboard = None
+    if not snap.plan_today:
+        return lines + ["Отдых."], None
+    for s in snap.plan_today:
+        desc = esc(" · ".join(x for x in (s["name"], s["desc"], f"≈{s['min']} мин" if s["min"] else "") if x))
+        if s["sport"] != "running":
+            lines.append(f"➕ <s>{desc}</s> — сегодня пропусти" if r.level == "red" else f"➕ {desc}")
+        elif r.level == "red":
+            lines += [f"<s>{desc}</s>", f"🛌 Вместо неё отдых или 20–30 мин совсем легко, пульс до {z['recovery_max']}."]
+        elif r.level == "yellow" and (s["long"] or s["label"] not in EASY_PLAN_LABELS):
+            minutes = min(max(round(s["min"] * 0.6), 30), 60) if s["long"] else 40
+            blocks, problem = checked_code(f"{minutes}e", r)
+            lines += [f"<s>{desc}</s>", f"🔄 Замена: {minutes} мин легко, пульс {z['easy'][0]}–{z['easy'][1]}"]
+            if blocks:
+                keyboard = watch_button(f"{minutes}e")
+        else:
+            lines.append(f"🏃 {desc}")
+            if r.level == "yellow":
+                lines.append("Держи пульс в нижней части зоны.")
+    return lines, keyboard
+
+
 def session_lines(s: Session, z: dict) -> list[str]:
     total = sum(b.total for b in s.blocks) // 60
     return [f"🏃 <b>{esc(s.title)}</b> · ≈{total} мин",
@@ -317,15 +365,17 @@ def session_lines(s: Session, z: dict) -> list[str]:
             *([f"💡 {esc(s.note)}"] if s.note else [])]
 
 
-def build_message(today: date, label: str, summary: str, r: Readiness, body: list[str], notes: list[str]) -> str:
+def build_message(today: date, label: str, summary: str, r: Readiness, body: list[str], notes: list[str],
+                  show_limits: bool = True) -> str:
     """Short on purpose: the same lines every morning are noise."""
     lines = [f"<b>{WEEKDAYS_SHORT[today.weekday()].capitalize()}, {today.day} {MONTHS_GEN[today.month - 1]}</b> · {label}",
              *(esc(n) for n in notes)]
     if summary:
         lines.append(esc(summary))
-    if r.reasons and not r.day_off:
-        # Recovery signals come first; two reasons explain the decision, the rest is noise
-        lines.append("⚠️ " + esc("; ".join(list(dict.fromkeys(r.reasons))[:2])))
+    # Recovery signals come first; two reasons explain the decision, the rest is noise
+    reasons = list(dict.fromkeys(r.reasons + (r.limits if show_limits else [])))[:2]
+    if reasons and not r.day_off:
+        lines.append("⚠️ " + esc("; ".join(reasons)))
     return "\n".join(lines + [""] + body)
 
 
@@ -362,12 +412,21 @@ def main() -> None:
     label = "😴 <b>выходной</b>" if readiness.day_off else LEVEL_LABEL[readiness.level]
     keyboard = None
 
-    # Rest days and finished days need no LLM: nothing to choose
-    if readiness.day_off:
-        body = ["Бега нет — завтра длительный."]
+    # Rest days, race days and finished days need no LLM: nothing to choose
+    race_today = next((x for x in snap.races if x["date"] == today), None)
+    if race_today:
+        label, body = "🏁 <b>старт</b>", [f"Сегодня {esc(race_today['title'])}. Удачи!"]
+        readiness.reasons.clear()
+    elif readiness.day_off:
+        race_tomorrow = any(x["date"] == today + timedelta(1) for x in snap.races)
+        body = ["Бега нет — завтра старт." if race_tomorrow else "Бега нет — завтра длительный."]
     elif any(a["date"] == today and a["sport"] == "running" for a in snap.acts):
         label, body = "✅ <b>сделано</b>", ["Тренировка сегодня уже выполнена."]
         readiness.reasons.clear()   # limits for a finished day are irrelevant
+        readiness.limits.clear()
+    elif snap.plan_info:
+        # Garmin plan sets the schedule; only recovery signals apply, not the bot's own spacing rules
+        body, keyboard = plan_lines(snap, readiness, zones)
     elif readiness.level == "red":
         body = [f"Отдых или 20–30 мин совсем легко, пульс до {zones['recovery_max']}."]
     else:
@@ -377,13 +436,13 @@ def main() -> None:
             session = Session("Тренировка", problem=str(exc))
         if session.code:
             body = session_lines(session, zones)
-            # The whole workout travels in the button (<=64 bytes): nothing is stored between steps
-            keyboard = {"inline_keyboard": [[{"text": "⌚ Отправить на часы", "callback_data": f"W:{session.code}"}]]}
+            keyboard = watch_button(session.code)
         else:
             body = [f"🏃 {esc(allowed_sessions(readiness, zones)[0])}",
                     f"<i>Без кнопки для часов: {esc(session.problem or 'нет кода')}</i>"]
 
-    message = build_message(today, label, summary, readiness, body, notes)
+    # On Garmin plan days the bot's own intensity rules do not apply, so they are not shown either
+    message = build_message(today, label, summary, readiness, body, notes, show_limits=not snap.plan_info)
     if args.dry_run:
         print(message)
         print(f"[button] {keyboard['inline_keyboard'][0][0]['callback_data'] if keyboard else 'нет'}")
