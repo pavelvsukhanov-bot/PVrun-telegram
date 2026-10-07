@@ -1,9 +1,18 @@
 name: Garmin → Telegram
 
 on:
+  # Fallback only: GitHub delays/drops scheduled runs (in practice every 3-9 h).
+  # Off-peak minutes are dropped less often than :00/:30.
   schedule:
-    - cron: '*/30 * * * *'   # every 30 minutes
-  workflow_dispatch:           # manual trigger
+    - cron: '7,37 * * * *'
+  # Main trigger: cron-job.org calls the workflow_dispatch API every 15 min.
+  workflow_dispatch:
+
+# External + scheduled triggers can overlap: run one at a time so a run is
+# never sent twice and state.json pushes don't race.
+concurrency:
+  group: garmin-sync
+  cancel-in-progress: false
 
 jobs:
   sync:
@@ -64,6 +73,7 @@ jobs:
           1. python setup_tokens.py (введи код MFA)
           2. Строку токена → секрет GARMINTOKENS на GitHub
           3. Actions → «Garmin → Telegram» → Enable workflow → Run workflow
+          4. cron-job.org: проверь, что задание включено (после серии ошибок оно отключается)
 
           Лог: ${RUN_URL}"
             gh workflow disable garmin_sync.yml
@@ -82,5 +92,7 @@ jobs:
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add state.json
-          git diff --staged --quiet || git commit -m "chore: update sync state [skip ci]"
+          git diff --staged --quiet && exit 0
+          git commit -m "chore: update sync state [skip ci]"
+          git pull --rebase   # main may have moved since checkout
           git push
