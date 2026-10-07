@@ -9,14 +9,13 @@ Usage:
 
 import argparse
 import html
-import os
 import sys
 from datetime import date, timedelta
 
-import requests
 from dotenv import load_dotenv
 
 from db import get_conn
+from llm import ask_groq
 from telegram import tg_send
 
 load_dotenv()
@@ -131,10 +130,6 @@ def technique_emoji(metric: str, value: float | None) -> str:
 # ── AI analysis ───────────────────────────────────────────────────────────────
 
 def generate_ai_analysis(stats: dict, month_name: str) -> str:
-    api_key = os.environ.get("GROQ_API_KEY")
-    if not api_key:
-        return "⚠️ GROQ_API_KEY не задан — анализ недоступен."
-
     prompt = f"""Ты опытный тренер по бегу. Проанализируй тренировочный месяц бегуна,
 который готовится к марафону, и дай конкретные рекомендации.
 
@@ -170,19 +165,10 @@ def generate_ai_analysis(stats: dict, month_name: str) -> str:
 
 Отвечай на русском языке. Будь конкретным и практичным."""
 
-    resp = requests.post(
-        "https://api.groq.com/openai/v1/chat/completions",
-        headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
-        json={
-            "model": "openai/gpt-oss-120b",
-            "messages": [{"role": "user", "content": prompt}],
-            "max_tokens": 700,
-        },
-        timeout=30,
-    )
-    if not resp.ok:
-        return f"⚠️ Groq API недоступен ({resp.status_code}): {resp.text[:150]}"
-    return resp.json()["choices"][0]["message"]["content"].strip()
+    try:
+        return ask_groq(prompt, max_tokens=700)
+    except RuntimeError as exc:
+        return f"⚠️ {exc} — анализ недоступен."
 
 
 # ── Report builder ────────────────────────────────────────────────────────────

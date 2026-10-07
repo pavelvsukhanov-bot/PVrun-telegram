@@ -1,0 +1,72 @@
+name: Daily Training Plan
+
+on:
+  # Triggered by cron-job.org at 08:30 Europe/Madrid. No GitHub schedule as a
+  # fallback: it runs hours late, and a plan at 15:00 is worse than none.
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Dry run — print the plan in the log, do not send'
+        type: boolean
+        default: false
+
+concurrency:
+  group: daily-plan
+  cancel-in-progress: false
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: '3.13'   # garminconnect >=0.3.3 requires Python >=3.12
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Build and send plan
+        id: plan
+        run: |
+          set +e
+          if [ "${{ inputs.dry_run }}" = "true" ]; then
+            python daily_plan.py --dry-run
+          else
+            python daily_plan.py
+          fi
+          code=$?
+          echo "exit_code=$code" >> "$GITHUB_OUTPUT"
+          exit $code
+        env:
+          TREDICT_TOKEN:       ${{ secrets.TREDICT_TOKEN }}
+          GROQ_API_KEY:        ${{ secrets.GROQ_API_KEY }}
+          TELEGRAM_BOT_TOKEN:  ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID:    ${{ secrets.TELEGRAM_CHAT_ID }}
+
+      # Exit code 3 = Tredict rejected the token (deactivated after 2 weeks
+      # without visiting the Tredict web UI).
+      - name: Alert on failure
+        if: failure()
+        env:
+          EXIT_CODE:           ${{ steps.plan.outputs.exit_code }}
+          RUN_URL:             ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          TELEGRAM_BOT_TOKEN:  ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID:    ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          if [ "$EXIT_CODE" = "3" ]; then
+            text="⚠️ План на сегодня не составлен: Tredict не принял токен.
+          Обычно это значит, что ты не заходил на tredict.com 2 недели. Зайди на сайт — токен включится сам, завтра план придёт как обычно.
+          Если не поможет: создай новый токен (activityRead + bodyvaluesRead) и обнови секрет TREDICT_TOKEN.
+
+          Лог: ${RUN_URL}"
+          else
+            text="⚠️ План на сегодня не составлен из-за ошибки.
+          Лог: ${RUN_URL}"
+          fi
+          curl -s -o /dev/null -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+            --data-urlencode "chat_id=${TELEGRAM_CHAT_ID}" --data-urlencode "text=${text}"
