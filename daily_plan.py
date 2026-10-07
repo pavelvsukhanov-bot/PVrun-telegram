@@ -48,7 +48,6 @@ LEVEL_LABEL = {
     "red": "🔴 <b>отдых</b>",
 }
 WEEKDAYS = ["понедельник", "вторник", "среда", "четверг", "пятница", "суббота", "воскресенье"]
-WEEKDAYS_ACC = ["понедельник", "вторник", "среду", "четверг", "пятницу", "субботу", "воскресенье"]
 WEEKDAYS_SHORT = ["пн", "вт", "ср", "чт", "пт", "сб", "вс"]
 MONTHS_GEN = ["января", "февраля", "марта", "апреля", "мая", "июня", "июля",
               "августа", "сентября", "октября", "ноября", "декабря"]
@@ -162,14 +161,10 @@ def assess(today: date, snap: Snapshot) -> tuple[Readiness, list[str]]:
     return r, lines
 
 
-# ── Plan text ────────────────────────────────────────────────────────────────
+# ── Session choice ───────────────────────────────────────────────────────────
 
 def allowed_sessions(r: Readiness, z: dict) -> list[str]:
     easy = f"{z['easy'][0]}–{z['easy'][1]}"
-    if r.day_off:
-        return ["ВЫХОДНОЙ: бега нет. Прогулка, растяжка или ролл — по желанию; цель — свежим выйти на воскресный длительный."]
-    if r.level == "red":
-        return [f"ОТДЫХ: полный отдых или 20–30 мин очень лёгкого бега/ходьбы, пульс до {z['recovery_max']}. Без интенсивности."]
     if r.level == "yellow":
         return [f"ЛЁГКИЙ ДЕНЬ: 30–60 мин лёгкого бега, пульс {easy}. Без интервалов и ускорений."]
     if r.long_ok:
@@ -181,8 +176,18 @@ def allowed_sessions(r: Readiness, z: dict) -> list[str]:
     return options
 
 
+WATCH_CODE_RULES = """Код тренировки для часов. Блоки через «|»:
+префикс w — разминка, c — заминка (у основной работы префикса нет); NxДЛИТ — повторы;
+длительность: число = МИНУТЫ, секунды ОБЯЗАТЕЛЬНО с «s» (ускорения по 20 секунд — 20s, а не 20!);
+после длительности всегда буква зоны: r восстановление, e лёгкая, m средняя, t ПАНО, v МПК;
+«/ДЛИТзона» — отдых между повторами. Только латиница и цифры, без пробелов.
+Примеры: w10e|4x8t/2e|c10e (4×8 мин ПАНО) · w10e|20m|c10e (20 мин в средней зоне) ·
+w15e|5x3v/3r|c10e (5×3 мин МПК) · 50e|6x20sv/90sr (50 мин легко + 6 ускорений по 20 секунд) ·
+120e (длительный 2 часа)"""
+
+
 def build_prompt(today: date, r: Readiness, metrics: list[str], z: dict, snap: Snapshot) -> str:
-    recent = [a for a in snap.acts if (today - a["date"]).days <= 14 and a["date"] <= today]
+    recent = [a for a in snap.acts if (today - a["date"]).days <= 14 and a["date"] < today]
     history = "\n".join(
         f"- {WEEKDAYS_SHORT[a['date'].weekday()]} {a['date']:%d.%m}: {a['sport']}, {a['km']:.1f} км, "
         f"{a['min']:.0f} мин, темп {fmt_pace(a['pace'])}, пульс {a['hr'] or '—'}, "
@@ -193,11 +198,10 @@ def build_prompt(today: date, r: Readiness, metrics: list[str], z: dict, snap: S
                  and (today - a["date"]).days <= 365]
     best = min(marathons, key=lambda a: a["min"]) if marathons else None
     best_txt = f"{int(best['min'] // 60)}:{int(best['min'] % 60):02d} ({best['date']:%d.%m.%Y})" if best else "нет данных"
-    today_done = any(a["date"] == today and a["sport"] == "running" for a in recent)
     options = "\n".join(f"{i}. {o}" for i, o in enumerate(allowed_sessions(r, z), 1))
     context = "\n".join(f"- {c}" for c in snap.context)
 
-    return f"""Ты тренер по бегу. Составь тренировку на сегодня ({WEEKDAYS[today.weekday()]}, {today:%d.%m.%Y}).
+    return f"""Ты тренер по бегу. Выбери тренировку на сегодня ({WEEKDAYS[today.weekday()]}, {today:%d.%m.%Y}).
 
 Долгосрочная цель бегуна: {GOAL}. Лучший марафон за год: {best_txt}.
 Это многолетняя цель: тренировки строй от ТЕКУЩЕГО уровня и пульсовых зон, а не от целевого темпа 4:15/км.
@@ -215,38 +219,22 @@ def build_prompt(today: date, r: Readiness, metrics: list[str], z: dict, snap: S
 
 Тренировки за 14 дней:
 {history}
-{"Сегодня тренировка УЖЕ выполнена — дай рекомендации по восстановлению, новую тренировку не назначай." if today_done else ""}
 
 Разрешённые варианты на сегодня (выбери РОВНО ОДИН, с учётом баланса недели и дня недели):
 {options}
 
-Ответ строго в формате, без markdown и без лишних заголовков:
-ТРЕНИРОВКА: название
-РАЗМИНКА: ...
-ОСНОВНАЯ ЧАСТЬ: конкретные отрезки/время с пульсом
-ЗАМИНКА: ...
-ЗАЧЕМ: 1–2 предложения, как это ведёт к цели
-СЕГОДНЯ ВАЖНО: 1–2 совета по восстановлению (сон, питание, жара)
-ЧАСЫ: код этой же тренировки для загрузки на часы Garmin
-
 {WATCH_CODE_RULES}
-Для отдыха, выходного или если тренировка уже выполнена: ЧАСЫ: нет
 
-Для дня отдыха вместо разминки/заминки кратко опиши, чем заняться. Пиши по-русски, кратко и конкретно.
-В тексте тренировки не используй буквы зон из кода — называй зоны словами и пульсом."""
-
-
-WATCH_CODE_RULES = """Код для часов — ровно то же, что в РАЗМИНКЕ/ОСНОВНОЙ ЧАСТИ/ЗАМИНКЕ. Блоки через «|»:
-префикс w — разминка, c — заминка (у основной работы префикса нет); NxДЛИТ — повторы;
-длительность: число = МИНУТЫ, секунды ОБЯЗАТЕЛЬНО с «s» (ускорения по 20 секунд — 20s, а не 20!);
-буква зоны: r восстановление, e лёгкая, m средняя, t ПАНО, v МПК; «/ДЛИТзона» — отдых между повторами.
-Только латиница и цифры, без пробелов.
-Примеры: w10e|4x8t/2e|c10e (4×8 мин ПАНО) · w10e|20m|c10e (20 мин в средней зоне) · w15e|5x3v/3r|c10e (5×3 мин МПК) ·
-50e|6x20sv/90sr (50 мин легко + 6 ускорений по 20 секунд) · 120e (длительный 2 часа)"""
+Ответ строго в три строки, без markdown:
+НАЗВАНИЕ: 2–4 слова, например «Порог 2×12», «Лёгкий бег», «Длительный 2 ч»
+ЧАСЫ: код выбранной тренировки
+ЗАМЕТКА: одна короткая фраза, только если сегодня есть что-то особенное именно по данным выше
+(например: сон короче нормы, первая интенсивная после перерыва, нехватка анаэробной нагрузки по Garmin).
+Общие советы про сон, воду, питание, растяжку и самочувствие НЕ писать. Если особенного нет: ЗАМЕТКА: нет"""
 
 
 def watch_problem(blocks: list, r: Readiness) -> str | None:
-    """Checks the watch code against today's rules — the code must not be harder than the plan allows."""
+    """Checks the code against today's rules — it must not be harder than the plan allows."""
     def minutes(zones: str) -> float:   # sustained work (>=60 s) in these zones
         return sum(b.reps * b.seconds for b in blocks if b.zone in zones and b.seconds >= 60) / 60 + \
                sum(b.reps * b.rest_seconds for b in blocks if b.rest_zone in zones and b.rest_seconds >= 60) / 60
@@ -265,9 +253,6 @@ def watch_problem(blocks: list, r: Readiness) -> str | None:
     return None
 
 
-WATCH_LINE = re.compile(r"^\s*ЧАСЫ:\s*(\S*)\s*$", re.M)
-
-
 def checked_code(code: str, r: Readiness) -> tuple[list | None, str | None]:
     try:
         blocks = watch_workout.parse(code)
@@ -277,54 +262,71 @@ def checked_code(code: str, r: Readiness) -> tuple[list | None, str | None]:
     return (None, problem) if problem else (blocks, None)
 
 
-def extract_watch_code(plan: str, r: Readiness) -> tuple[str, tuple[str, list] | None, str | None]:
-    """Strips the ЧАСЫ line from the plan text.
+def field_value(name: str, answer: str) -> str:
+    m = re.search(rf"^\s*{name}:\s*(.*?)\s*$", answer, re.M)
+    return m.group(1).strip().strip("«»\"`") if m else ""
 
-    Returns (text, (code, blocks) or None, problem). A code that is malformed or
-    harder than today's rules allow gets one LLM retry, then no button.
+
+@dataclass
+class Session:
+    title: str
+    code: str | None = None
+    blocks: list | None = None
+    note: str | None = None
+    problem: str | None = None    # why there is no watch code
+
+
+def choose_session(prompt: str, r: Readiness, z: dict) -> Session:
+    """LLM picks one allowed session as title + watch code + optional note.
+
+    The code is the session itself: it is checked against today's rules, gets
+    one LLM retry if malformed or too hard, otherwise the session is dropped.
     """
-    m = WATCH_LINE.search(plan)
-    text = WATCH_LINE.sub("", plan).strip()
-    if not m or m.group(1).lower() in ("", "нет"):
-        return text, None, None
-    code = m.group(1)
-    blocks, problem = checked_code(code, r)
-    if problem:
-        print(f"Watch code rejected ({code!r}): {problem}; retrying", file=sys.stderr)
-        try:
-            code = ask_groq(f"""Тренировка:
-{text}
+    answer = ask_groq(prompt, max_tokens=3000)
+    note = field_value("ЗАМЕТКА", answer)
+    s = Session(field_value("НАЗВАНИЕ", answer) or "Тренировка",
+                note=None if note.lower() in ("", "нет", "-", "—") else note)
+    code = field_value("ЧАСЫ", answer)
+    s.blocks, s.problem = checked_code(code, r)
+    if s.problem:
+        print(f"Watch code rejected ({code!r}): {s.problem}; retrying", file=sys.stderr)
+        code = ask_groq(f"""Тренировка «{s.title}». Разрешено сегодня:
+{chr(10).join(allowed_sessions(r, z))}
 
-Код для часов «{code}» неверен: {problem}.
+Код «{code}» неверен: {s.problem}.
 {WATCH_CODE_RULES}
-Напиши ТОЛЬКО исправленный код этой тренировки одной строкой, без пояснений.""", max_tokens=1500).strip().strip("`")
-            blocks, problem = checked_code(code, r)
-        except RuntimeError as exc:
-            problem = str(exc)
-    if problem:
-        print(f"Watch code rejected again ({code!r}): {problem}", file=sys.stderr)
-        return text, None, problem
-    return text, (code, blocks), None
+Напиши ТОЛЬКО исправленный код одной строкой, без пояснений.""", max_tokens=1500).strip().strip("`")
+        s.blocks, s.problem = checked_code(code, r)
+    if s.problem:
+        print(f"Watch code rejected again ({code!r}): {s.problem}", file=sys.stderr)
+    else:
+        s.code = code
+    return s
 
 
-def build_message(today: date, r: Readiness, metrics: list[str], plan: str, notes: list[str], source: str,
-                  watch: list | None = None) -> str:
-    esc = lambda s: html.escape(s, quote=False)
-    reasons = "".join(f"\n• {esc(x)}" for x in r.reasons)
-    return "\n".join([
-        f"🌅 <b>План на {WEEKDAYS_ACC[today.weekday()]}, {today.day} {MONTHS_GEN[today.month - 1]}</b>",
-        *(esc(n) for n in notes),
-        "",
-        f"Готовность: {'😴 <b>выходной</b>' if r.day_off else LEVEL_LABEL[r.level]}",
-        *(f"• {esc(m)}" for m in metrics),
-        *([f"\n<b>Ограничения:</b>{reasons}"] if r.reasons else []),
-        "",
-        "🏃 <b>Тренировка</b>",
-        esc("\n".join(line.rstrip() for line in plan.splitlines())),
-        *([f"\n⌚ <b>На часы:</b> {esc(watch_workout.describe(watch))}"] if watch else []),
-        "",
-        f"<i>Данные: {source}. Боль, недомогание или пульс выше обычного на разминке — снижай нагрузку или отдыхай.</i>",
-    ])
+# ── Message ──────────────────────────────────────────────────────────────────
+
+def esc(s: str) -> str:
+    return html.escape(s, quote=False)
+
+
+def session_lines(s: Session, z: dict) -> list[str]:
+    total = sum(b.total for b in s.blocks) // 60
+    return [f"🏃 <b>{esc(s.title)}</b> · ≈{total} мин",
+            *(esc(line) for line in watch_workout.describe_lines(s.blocks, z)),
+            *([f"💡 {esc(s.note)}"] if s.note else [])]
+
+
+def build_message(today: date, label: str, summary: str, r: Readiness, body: list[str], notes: list[str]) -> str:
+    """Short on purpose: the same lines every morning are noise."""
+    lines = [f"<b>{WEEKDAYS_SHORT[today.weekday()].capitalize()}, {today.day} {MONTHS_GEN[today.month - 1]}</b> · {label}",
+             *(esc(n) for n in notes)]
+    if summary:
+        lines.append(esc(summary))
+    if r.reasons and not r.day_off:
+        # Recovery signals come first; two reasons explain the decision, the rest is noise
+        lines.append("⚠️ " + esc("; ".join(list(dict.fromkeys(r.reasons))[:2])))
+    return "\n".join(lines + [""] + body)
 
 
 # ── Main ─────────────────────────────────────────────────────────────────────
@@ -337,7 +339,7 @@ def load_snapshot(today: date, source: str, notes: list[str]) -> Snapshot:
             if source == "garmin":
                 raise
             print(f"Garmin unavailable, falling back to Tredict: {exc!r}", file=sys.stderr)
-            notes.append("⚠️ Garmin недоступен — план по данным Tredict")
+            notes.append("⚠️ Garmin недоступен — данные Tredict")
     return tredict_snapshot(today)   # Tredict auth failure exits 3 → workflow alert
 
 
@@ -356,18 +358,32 @@ def main() -> None:
         notes.append(zones_note)
 
     readiness, metrics = assess(today, snap)
-    try:
-        plan = ask_groq(build_prompt(today, readiness, metrics, zones, snap), max_tokens=3000)
-    except RuntimeError as exc:
-        # The rules already decided what is safe; send that rather than nothing
-        plan = f"⚠️ {exc}. Рекомендация по правилам:\n{allowed_sessions(readiness, zones)[0]}"
+    summary = " · ".join(s.short for s in snap.signals if s.short)
+    label = "😴 <b>выходной</b>" if readiness.day_off else LEVEL_LABEL[readiness.level]
+    keyboard = None
 
-    plan, watch, problem = extract_watch_code(plan, readiness)
-    if problem:
-        plan += "\n\n⌚ Код для часов не прошёл проверку — эту тренировку создай вручную в Garmin Connect."
-    message = build_message(today, readiness, metrics, plan, notes, snap.source, watch[1] if watch else None)
-    # The whole workout travels in the button (<=64 bytes), so nothing is stored between steps
-    keyboard = {"inline_keyboard": [[{"text": "⌚ Отправить на часы", "callback_data": f"W:{watch[0]}"}]]} if watch else None
+    # Rest days and finished days need no LLM: nothing to choose
+    if readiness.day_off:
+        body = ["Бега нет — завтра длительный."]
+    elif any(a["date"] == today and a["sport"] == "running" for a in snap.acts):
+        label, body = "✅ <b>сделано</b>", ["Тренировка сегодня уже выполнена."]
+        readiness.reasons.clear()   # limits for a finished day are irrelevant
+    elif readiness.level == "red":
+        body = [f"Отдых или 20–30 мин совсем легко, пульс до {zones['recovery_max']}."]
+    else:
+        try:
+            session = choose_session(build_prompt(today, readiness, metrics, zones, snap), readiness, zones)
+        except RuntimeError as exc:   # Groq down: the rules already decided what is safe
+            session = Session("Тренировка", problem=str(exc))
+        if session.code:
+            body = session_lines(session, zones)
+            # The whole workout travels in the button (<=64 bytes): nothing is stored between steps
+            keyboard = {"inline_keyboard": [[{"text": "⌚ Отправить на часы", "callback_data": f"W:{session.code}"}]]}
+        else:
+            body = [f"🏃 {esc(allowed_sessions(readiness, zones)[0])}",
+                    f"<i>Без кнопки для часов: {esc(session.problem or 'нет кода')}</i>"]
+
+    message = build_message(today, label, summary, readiness, body, notes)
     if args.dry_run:
         print(message)
         print(f"[button] {keyboard['inline_keyboard'][0][0]['callback_data'] if keyboard else 'нет'}")

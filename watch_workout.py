@@ -97,6 +97,24 @@ def describe(blocks: list[Block]) -> str:
     return " → ".join(out) + f" · всего ≈{sum(b.total for b in blocks) // 60} мин"
 
 
+def describe_lines(blocks: list[Block], z: dict) -> list[str]:
+    """One line per block with HR ranges — the workout as it goes to the watch."""
+    def part(seconds: int, zone: str) -> str:
+        if seconds < NO_TARGET_BELOW_S:
+            return f"{_dur_ru(seconds)} ускорение"
+        lo, hi = hr_range(zone, z)
+        return f"{_dur_ru(seconds)} {ZONE_RU[zone]} {lo}–{hi}"
+    lines = []
+    for b in blocks:
+        prefix = {"warmup": "разминка ", "cooldown": "заминка ", "main": ""}[b.kind]
+        if b.reps > 1:
+            rest = f" / {_dur_ru(b.rest_seconds)} {ZONE_RU[b.rest_zone]}" if b.rest_seconds else ""
+            lines.append(f"{prefix}{b.reps} × {part(b.seconds, b.zone)}{rest}")
+        else:
+            lines.append(prefix + part(b.seconds, b.zone))
+    return lines
+
+
 def short_title(blocks: list[Block]) -> str:
     main = [b for b in blocks if b.kind == "main"] or blocks
     key = max(main, key=lambda b: "remtv".index(b.zone))

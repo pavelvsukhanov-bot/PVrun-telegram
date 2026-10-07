@@ -29,6 +29,7 @@ class Signal:
     level: str | None = None   # "yellow" / "red" when it limits training
     reason: str = ""
     warning: bool = False      # counts towards "2 under-recovery signals → rest"
+    short: str = ""            # compact form for the one-line summary ("" = not shown)
 
 
 @dataclass
@@ -46,6 +47,11 @@ def fmt_hm(seconds: float) -> str:
     return f"{h} ч {m:02d} мин"
 
 
+def fmt_hhmm(seconds: float) -> str:
+    h, m = divmod(round(seconds / 60), 60)
+    return f"{h}:{m:02d}"
+
+
 def fmt_hms(seconds: float) -> str:
     s = round(seconds)
     return f"{s // 3600}:{s % 3600 // 60:02d}:{s % 60:02d}"
@@ -54,24 +60,27 @@ def fmt_hms(seconds: float) -> str:
 # ── Shared thresholds ────────────────────────────────────────────────────────
 
 def missing(what: str) -> Signal:
-    return Signal(f"{what}: нет данных за ночь", "yellow", f"нет данных: {what.lower()} — синхронизируй часы")
+    return Signal(f"{what}: нет данных за ночь", "yellow", f"нет данных: {what.lower()} — синхронизируй часы",
+                  short=f"нет данных: {what.lower()}")
 
 
 def sleep_signal(sec: float, need: float, text: str, score: int | None = None) -> Signal:
+    short = f"сон {fmt_hhmm(sec)}" + (f" ({score})" if score is not None else "")
     if sec < 5 * 3600:
-        return Signal(text, "red", f"сон всего {fmt_hm(sec)}")
+        return Signal(text, "red", f"сон всего {fmt_hm(sec)}", short=short)
     if sec < 6.5 * 3600 or sec < 0.85 * need or (score is not None and score < 60):
-        return Signal(text, "yellow", f"сон хуже нормы ({fmt_hm(sec)})", warning=True)
-    return Signal(text)
+        return Signal(text, "yellow", f"сон хуже нормы ({fmt_hm(sec)})", warning=True, short=short)
+    return Signal(text, short=short)
 
 
 def rhr_signal(today_hr: float, norm: float) -> Signal:
     text = f"Пульс покоя: {today_hr:.0f} (норма {norm:.0f})"
+    short = f"пульс покоя {today_hr:.0f}"
     if today_hr - norm >= 8:
-        return Signal(text, "red", f"пульс покоя выше нормы на {today_hr - norm:.0f}")
+        return Signal(text, "red", f"пульс покоя выше нормы на {today_hr - norm:.0f}", short=short)
     if today_hr - norm >= 5:
-        return Signal(text, "yellow", f"пульс покоя выше нормы на {today_hr - norm:.0f}", warning=True)
-    return Signal(text)
+        return Signal(text, "yellow", f"пульс покоя выше нормы на {today_hr - norm:.0f}", warning=True, short=short)
+    return Signal(text, short=short)
 
 
 # ── Garmin (primary) ─────────────────────────────────────────────────────────
@@ -104,12 +113,13 @@ def garmin_snapshot(today: date) -> Snapshot:
     if wake:
         score, level = wake[0].get("score"), wake[0].get("level")
         text = f"Готовность Garmin: {score} — {READINESS_RU.get(level, level)}"
+        short = f"готовность {score}"
         if level == "POOR":
-            snap.signals.append(Signal(text, "red", f"готовность Garmin очень низкая ({score})"))
+            snap.signals.append(Signal(text, "red", f"готовность Garmin очень низкая ({score})", short=short))
         elif level == "LOW":
-            snap.signals.append(Signal(text, "yellow", f"готовность Garmin низкая ({score})"))
+            snap.signals.append(Signal(text, "yellow", f"готовность Garmin низкая ({score})", short=short))
         else:
-            snap.signals.append(Signal(text))
+            snap.signals.append(Signal(text, short=short))
     else:
         snap.signals.append(missing("Готовность Garmin"))
 
@@ -120,12 +130,13 @@ def garmin_snapshot(today: date) -> Snapshot:
         low, high, floor = base["balancedLow"], base.get("balancedUpper"), base.get("lowUpper") or 0
         text = (f"ВСР: {night} мс, за неделю {week} (норма {low}–{high}), "
                 f"{HRV_STATUS_RU.get(hrv.get('status'), hrv.get('status'))}")
+        short = f"ВСР {night} ({low}–{high})"
         if night < floor or hrv.get("status") == "POOR":
-            snap.signals.append(Signal(text, "red", f"ВСР {night} мс — ниже твоего нижнего порога {floor}"))
+            snap.signals.append(Signal(text, "red", f"ВСР {night} мс — ниже твоего нижнего порога {floor}", short=short))
         elif night < low or (week and week < low):
-            snap.signals.append(Signal(text, "yellow", f"ВСР ниже нормы ({night} при норме от {low})", warning=True))
+            snap.signals.append(Signal(text, "yellow", f"ВСР ниже нормы ({night} при норме от {low})", warning=True, short=short))
         else:
-            snap.signals.append(Signal(text))
+            snap.signals.append(Signal(text, short=short))
     else:
         snap.signals.append(missing("ВСР"))
 
@@ -219,13 +230,14 @@ def tredict_snapshot(today: date) -> Snapshot:
         night, base = hrv[today]
         r3 = mean(hrv[d][0] / hrv[d][1] for d in (today - timedelta(i) for i in range(3)) if d in hrv and hrv[d][1])
         text = f"ВСР: {night} мс (норма {base})"
+        short = f"ВСР {night} (норма {base})"
         # A crash (<60%) is red on its own: good nights before it must not mask it
         if night / base < 0.6 or (night / base < 0.75 and r3 < 0.9):
-            snap.signals.append(Signal(text, "red", f"ВСР {night} мс — сильно ниже нормы {base}"))
+            snap.signals.append(Signal(text, "red", f"ВСР {night} мс — сильно ниже нормы {base}", short=short))
         elif night / base < 0.85 or r3 < 0.9:
-            snap.signals.append(Signal(text, "yellow", f"ВСР ниже нормы ({night} при норме {base})", warning=True))
+            snap.signals.append(Signal(text, "yellow", f"ВСР ниже нормы ({night} при норме {base})", warning=True, short=short))
         else:
-            snap.signals.append(Signal(text))
+            snap.signals.append(Signal(text, short=short))
     else:
         snap.signals.append(missing("ВСР"))
 

@@ -69,12 +69,8 @@ def main() -> None:
         return
     client.schedule_workout(workout_id, day.isoformat())
 
-    tg_send("\n".join([
-        f"✅ <b>{html.escape(name)}</b> — в календаре Garmin на сегодня.",
-        html.escape(watch_workout.describe(blocks)),
-        "",
-        "Синхронизируй часы (Garmin Connect на телефоне) — тренировка появится в «Тренировки» → «Календарь».",
-    ]))
+    # The plan message already shows the steps; the confirmation only needs the next action
+    tg_send(f"⌚ «{html.escape(name)}» в календаре Garmin — синхронизируй часы.")
     print(f"Workout {workout_id} scheduled for {day}")
 
 
