@@ -1,5 +1,6 @@
 """
-Daily training plan → Telegram at 08:30 Europe/Madrid (triggered by cron-job.org).
+Training plan for today → Telegram, on demand: the user sends "?" to the bot,
+a Cloudflare Worker (telegram_worker/worker.js) starts this workflow.
 
 Readiness is decided by fixed rules from Tredict data (overnight HRV, sleep,
 resting HR, training load, recent sessions). The LLM only writes the session
@@ -38,6 +39,8 @@ LONG_MIN = 90
 RACE_KM = 30            # race-length run → protected recovery window
 RACE_RECOVERY_DAYS = 14
 MAX_RUN_STREAK = 6      # consecutive running days before a forced rest
+REST_WEEKDAY = 5        # Saturday: always a day off
+LONG_WEEKDAY = 6        # Sunday: the only day for the long run
 
 LEVELS = {"green": 0, "yellow": 1, "red": 2}
 LEVEL_LABEL = {
@@ -118,6 +121,7 @@ class Readiness:
     reasons: list[str] = field(default_factory=list)
     quality_ok: bool = True     # threshold / VO2 session allowed
     long_ok: bool = False       # long run allowed
+    day_off: bool = False       # scheduled rest day
 
     def cap(self, level: str, reason: str) -> None:
         if LEVELS[level] > LEVELS[self.level]:
@@ -244,14 +248,20 @@ def assess(today: date, hrv: dict, sleep: dict, rhr: dict, efforts: dict, runs: 
 
     longs = [x for x in past if is_long(x) and x["km"] < RACE_KM]
     days_since_long = (today - longs[-1]["date"]).days if longs else None
-    if not races and (days_since_long is None or days_since_long >= 6):
-        r.long_ok = True
+    if today.weekday() == LONG_WEEKDAY:
+        r.quality_ok = False    # Sunday is reserved for the long run
+        if not races and (days_since_long is None or days_since_long >= 6):
+            r.long_ok = True
 
     streak = 0
     while any(x["date"] == today - timedelta(streak + 1) for x in past):
         streak += 1
     if streak >= MAX_RUN_STREAK:
         r.cap("red", f"{streak} дней подряд с бегом — нужен день отдыха")
+
+    if today.weekday() == REST_WEEKDAY:
+        r.day_off = True
+        r.cap("red", "суббота — выходной")
 
     if r.level != "green":
         r.quality_ok = r.long_ok = False
@@ -262,16 +272,18 @@ def assess(today: date, hrv: dict, sleep: dict, rhr: dict, efforts: dict, runs: 
 
 def allowed_sessions(r: Readiness, z: dict) -> list[str]:
     easy = f"{z['easy'][0]}–{z['easy'][1]}"
+    if r.day_off:
+        return ["ВЫХОДНОЙ: бега нет. Прогулка, растяжка или ролл — по желанию; цель — свежим выйти на воскресный длительный."]
     if r.level == "red":
         return [f"ОТДЫХ: полный отдых или 20–30 мин очень лёгкого бега/ходьбы, пульс до {z['recovery_max']}. Без интенсивности."]
     if r.level == "yellow":
         return [f"ЛЁГКИЙ ДЕНЬ: 30–60 мин лёгкого бега, пульс {easy}. Без интервалов и ускорений."]
+    if r.long_ok:
+        return [f"ДЛИТЕЛЬНЫЙ БЕГ (воскресенье): пульс {easy}, не больше чем на 10–15% длиннее последнего длительного."]
     options = [f"Аэробный бег 45–70 мин, пульс {easy}, в конце 4–6 ускорений по 20 с с полным отдыхом."]
     if r.quality_ok:
         options.append(f"Пороговая тренировка: темповые отрезки суммарно 20–30 мин, пульс {z['threshold'][0]}–{z['threshold'][1]}.")
         options.append(f"Интервалы на МПК: отрезки 2–4 мин, пульс от {z['vo2_min']}, суммарно 12–20 мин работы, отдых трусцой равный отрезку.")
-    if r.long_ok:
-        options.append(f"Длительный бег: пульс {easy}, не больше чем на 10–15% длиннее последнего длительного.")
     return options
 
 
@@ -295,7 +307,8 @@ def build_prompt(today: date, r: Readiness, metrics: list[str], z: dict, acts: l
 Долгосрочная цель бегуна: {GOAL}. Лучший марафон за год: {best_txt}.
 Это многолетняя цель: тренировки строй от ТЕКУЩЕГО уровня и пульсовых зон, а не от целевого темпа 4:15/км.
 Принципы: восстановление в приоритете; ~80% объёма легко; не больше 2 интенсивных тренировок в неделю;
-длительный бег раз в неделю, лучше в выходные; прирост недельного объёма не больше 10%.
+прирост недельного объёма не больше 10%.
+Расписание недели: суббота — выходной, воскресенье — длительный бег, ключевые тренировки лучше во вторник и четверг.
 
 Состояние после сна (решение по готовности уже принято правилами, НЕ повышай интенсивность):
 {chr(10).join('- ' + m for m in metrics)}
@@ -327,7 +340,7 @@ def build_message(today: date, r: Readiness, metrics: list[str], plan: str) -> s
     return "\n".join([
         f"🌅 <b>План на {WEEKDAYS_ACC[today.weekday()]}, {today.day} {MONTHS_GEN[today.month - 1]}</b>",
         "",
-        f"Готовность: {LEVEL_LABEL[r.level]}",
+        f"Готовность: {'😴 <b>выходной</b>' if r.day_off else LEVEL_LABEL[r.level]}",
         *(f"• {m}" for m in metrics),
         *([f"\n<b>Ограничения:</b>{reasons}"] if r.reasons else []),
         "",

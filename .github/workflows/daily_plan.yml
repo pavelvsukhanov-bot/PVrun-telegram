@@ -1,8 +1,8 @@
 name: Daily Training Plan
 
 on:
-  # Triggered by cron-job.org at 08:30 Europe/Madrid. No GitHub schedule as a
-  # fallback: it runs hours late, and a plan at 15:00 is worse than none.
+  # On demand only: "?" sent to the bot → Cloudflare Worker
+  # (telegram_worker/worker.js) → workflow_dispatch. No schedule.
   workflow_dispatch:
     inputs:
       dry_run:
