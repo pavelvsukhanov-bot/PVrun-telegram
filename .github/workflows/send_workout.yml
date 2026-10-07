@@ -1,0 +1,74 @@
+name: Send Workout to Watch
+
+on:
+  # "⌚ Отправить на часы" button → Cloudflare Worker → workflow_dispatch
+  workflow_dispatch:
+    inputs:
+      code:
+        description: 'Workout code from the button, e.g. w10e|4x8t/2e|c10e'
+        required: true
+      msg_date:
+        description: 'Plan message date (unix time)'
+        required: true
+      message_id:
+        description: 'Plan message id (to remove the button)'
+        required: true
+
+concurrency:
+  group: send-workout
+  cancel-in-progress: false
+
+jobs:
+  send:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: '3.13'   # garminconnect >=0.3.3 requires Python >=3.12
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      # Inputs go through env, never inline into the script (no shell injection)
+      - name: Upload and schedule workout
+        id: send
+        run: |
+          set +e
+          python send_workout.py --code "$CODE" --msg-date "$MSG_DATE" --message-id "$MESSAGE_ID"
+          code=$?
+          echo "exit_code=$code" >> "$GITHUB_OUTPUT"
+          exit $code
+        env:
+          CODE:                ${{ inputs.code }}
+          MSG_DATE:            ${{ inputs.msg_date }}
+          MESSAGE_ID:          ${{ inputs.message_id }}
+          GARMIN_EMAIL:        ${{ secrets.GARMIN_EMAIL }}
+          GARMIN_PASSWORD:     ${{ secrets.GARMIN_PASSWORD }}
+          GARMINTOKENS:        ${{ secrets.GARMINTOKENS }}
+          TREDICT_TOKEN:       ${{ secrets.TREDICT_TOKEN }}
+          TELEGRAM_BOT_TOKEN:  ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID:    ${{ secrets.TELEGRAM_CHAT_ID }}
+
+      - name: Alert on failure
+        if: failure()
+        env:
+          EXIT_CODE:           ${{ steps.send.outputs.exit_code }}
+          RUN_URL:             ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          TELEGRAM_BOT_TOKEN:  ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID:    ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          if [ "$EXIT_CODE" = "2" ]; then
+            text="⚠️ Тренировка не отправлена на часы: Garmin не пускает (токены отклонены или нужен MFA).
+          Обнови токены: python setup_tokens.py → секрет GARMINTOKENS.
+          Лог: ${RUN_URL}"
+          else
+            text="⚠️ Тренировка не отправлена на часы из-за ошибки. Её можно создать вручную в Garmin Connect.
+          Лог: ${RUN_URL}"
+          fi
+          curl -s -o /dev/null -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+            --data-urlencode "chat_id=${TELEGRAM_CHAT_ID}" --data-urlencode "text=${text}"

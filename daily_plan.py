@@ -19,6 +19,7 @@ import sys
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 
+import watch_workout
 from llm import ask_groq
 from plan_sources import TZ, Snapshot, garmin_snapshot, hr_zones, tredict_snapshot
 from telegram import tg_send
@@ -226,11 +227,88 @@ def build_prompt(today: date, r: Readiness, metrics: list[str], z: dict, snap: S
 ЗАМИНКА: ...
 ЗАЧЕМ: 1–2 предложения, как это ведёт к цели
 СЕГОДНЯ ВАЖНО: 1–2 совета по восстановлению (сон, питание, жара)
+ЧАСЫ: код этой же тренировки для загрузки на часы Garmin
 
-Для дня отдыха вместо разминки/заминки кратко опиши, чем заняться. Пиши по-русски, кратко и конкретно."""
+{WATCH_CODE_RULES}
+Для отдыха, выходного или если тренировка уже выполнена: ЧАСЫ: нет
+
+Для дня отдыха вместо разминки/заминки кратко опиши, чем заняться. Пиши по-русски, кратко и конкретно.
+В тексте тренировки не используй буквы зон из кода — называй зоны словами и пульсом."""
 
 
-def build_message(today: date, r: Readiness, metrics: list[str], plan: str, notes: list[str], source: str) -> str:
+WATCH_CODE_RULES = """Код для часов — ровно то же, что в РАЗМИНКЕ/ОСНОВНОЙ ЧАСТИ/ЗАМИНКЕ. Блоки через «|»:
+префикс w — разминка, c — заминка (у основной работы префикса нет); NxДЛИТ — повторы;
+длительность: число = МИНУТЫ, секунды ОБЯЗАТЕЛЬНО с «s» (ускорения по 20 секунд — 20s, а не 20!);
+буква зоны: r восстановление, e лёгкая, m средняя, t ПАНО, v МПК; «/ДЛИТзона» — отдых между повторами.
+Только латиница и цифры, без пробелов.
+Примеры: w10e|4x8t/2e|c10e (4×8 мин ПАНО) · w10e|20m|c10e (20 мин в средней зоне) · w15e|5x3v/3r|c10e (5×3 мин МПК) ·
+50e|6x20sv/90sr (50 мин легко + 6 ускорений по 20 секунд) · 120e (длительный 2 часа)"""
+
+
+def watch_problem(blocks: list, r: Readiness) -> str | None:
+    """Checks the watch code against today's rules — the code must not be harder than the plan allows."""
+    def minutes(zones: str) -> float:   # sustained work (>=60 s) in these zones
+        return sum(b.reps * b.seconds for b in blocks if b.zone in zones and b.seconds >= 60) / 60 + \
+               sum(b.reps * b.rest_seconds for b in blocks if b.rest_zone in zones and b.rest_seconds >= 60) / 60
+    total = sum(b.total for b in blocks) / 60
+    if r.level != "green" and any(b.zone in "mtv" for b in blocks):
+        return "сегодня только лёгкий бег, без ускорений"
+    if not r.quality_ok and minutes("mtv"):
+        return "интенсивные отрезки сегодня не разрешены (допустимы только ускорения короче минуты)"
+    limit = 180 if r.long_ok else 35 if r.level == "red" else 75 if r.level == "yellow" else 100
+    if total > limit:
+        return f"слишком долго: {total:.0f} мин при лимите {limit} мин"
+    if minutes("t") > 35:
+        return f"{minutes('t'):.0f} мин в зоне ПАНО — больше 35"
+    if minutes("v") > 22 or any(b.zone == "v" and b.seconds > 6 * 60 for b in blocks):
+        return "слишком много работы в зоне МПК (больше 22 мин или отрезки длиннее 6 мин)"
+    return None
+
+
+WATCH_LINE = re.compile(r"^\s*ЧАСЫ:\s*(\S*)\s*$", re.M)
+
+
+def checked_code(code: str, r: Readiness) -> tuple[list | None, str | None]:
+    try:
+        blocks = watch_workout.parse(code)
+    except ValueError as exc:
+        return None, str(exc)
+    problem = watch_problem(blocks, r)
+    return (None, problem) if problem else (blocks, None)
+
+
+def extract_watch_code(plan: str, r: Readiness) -> tuple[str, tuple[str, list] | None, str | None]:
+    """Strips the ЧАСЫ line from the plan text.
+
+    Returns (text, (code, blocks) or None, problem). A code that is malformed or
+    harder than today's rules allow gets one LLM retry, then no button.
+    """
+    m = WATCH_LINE.search(plan)
+    text = WATCH_LINE.sub("", plan).strip()
+    if not m or m.group(1).lower() in ("", "нет"):
+        return text, None, None
+    code = m.group(1)
+    blocks, problem = checked_code(code, r)
+    if problem:
+        print(f"Watch code rejected ({code!r}): {problem}; retrying", file=sys.stderr)
+        try:
+            code = ask_groq(f"""Тренировка:
+{text}
+
+Код для часов «{code}» неверен: {problem}.
+{WATCH_CODE_RULES}
+Напиши ТОЛЬКО исправленный код этой тренировки одной строкой, без пояснений.""", max_tokens=1500).strip().strip("`")
+            blocks, problem = checked_code(code, r)
+        except RuntimeError as exc:
+            problem = str(exc)
+    if problem:
+        print(f"Watch code rejected again ({code!r}): {problem}", file=sys.stderr)
+        return text, None, problem
+    return text, (code, blocks), None
+
+
+def build_message(today: date, r: Readiness, metrics: list[str], plan: str, notes: list[str], source: str,
+                  watch: list | None = None) -> str:
     esc = lambda s: html.escape(s, quote=False)
     reasons = "".join(f"\n• {esc(x)}" for x in r.reasons)
     return "\n".join([
@@ -243,6 +321,7 @@ def build_message(today: date, r: Readiness, metrics: list[str], plan: str, note
         "",
         "🏃 <b>Тренировка</b>",
         esc("\n".join(line.rstrip() for line in plan.splitlines())),
+        *([f"\n⌚ <b>На часы:</b> {esc(watch_workout.describe(watch))}"] if watch else []),
         "",
         f"<i>Данные: {source}. Боль, недомогание или пульс выше обычного на разминке — снижай нагрузку или отдыхай.</i>",
     ])
@@ -272,7 +351,7 @@ def main() -> None:
     today = args.date or datetime.now(TZ).date()
     notes: list[str] = []
     snap = load_snapshot(today, args.source, notes)
-    zones, zones_note = hr_zones(snap)
+    zones, zones_note = hr_zones(snap.lt_hr)
     if zones_note:
         notes.append(zones_note)
 
@@ -283,11 +362,17 @@ def main() -> None:
         # The rules already decided what is safe; send that rather than nothing
         plan = f"⚠️ {exc}. Рекомендация по правилам:\n{allowed_sessions(readiness, zones)[0]}"
 
-    message = build_message(today, readiness, metrics, plan, notes, snap.source)
+    plan, watch, problem = extract_watch_code(plan, readiness)
+    if problem:
+        plan += "\n\n⌚ Код для часов не прошёл проверку — эту тренировку создай вручную в Garmin Connect."
+    message = build_message(today, readiness, metrics, plan, notes, snap.source, watch[1] if watch else None)
+    # The whole workout travels in the button (<=64 bytes), so nothing is stored between steps
+    keyboard = {"inline_keyboard": [[{"text": "⌚ Отправить на часы", "callback_data": f"W:{watch[0]}"}]]} if watch else None
     if args.dry_run:
         print(message)
+        print(f"[button] {keyboard['inline_keyboard'][0][0]['callback_data'] if keyboard else 'нет'}")
         return
-    if not tg_send(message):
+    if not tg_send(message, keyboard):
         sys.exit("Failed to send plan to Telegram")
     print("Plan sent.")
 

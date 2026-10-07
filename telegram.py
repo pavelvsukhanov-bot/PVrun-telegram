@@ -9,18 +9,26 @@ from dotenv import load_dotenv
 load_dotenv()
 
 
-def tg_send(text: str) -> bool:
-    """Returns True if Telegram accepted the message."""
+def tg_call(method: str, **payload) -> bool:
+    """Calls a Bot API method in the configured chat. Returns True on success."""
     token = os.environ.get("TELEGRAM_BOT_TOKEN")
     chat_id = os.environ.get("TELEGRAM_CHAT_ID")
     if not token or not chat_id:
         print("[TG] TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID not set — skipping send")
         return False
-    url = f"https://api.telegram.org/bot{token}/sendMessage"
-    resp = requests.post(url, json={"chat_id": chat_id, "text": text, "parse_mode": "HTML"}, timeout=10)
+    url = f"https://api.telegram.org/bot{token}/{method}"
+    resp = requests.post(url, json={"chat_id": chat_id, **payload}, timeout=10)
     if not resp.ok:
-        print(f"[TG] Send failed: {resp.status_code} {resp.text}")
+        print(f"[TG] {method} failed: {resp.status_code} {resp.text}")
     return resp.ok
+
+
+def tg_send(text: str, reply_markup: dict | None = None) -> bool:
+    """Returns True if Telegram accepted the message."""
+    payload = {"text": text, "parse_mode": "HTML"}
+    if reply_markup:
+        payload["reply_markup"] = reply_markup
+    return tg_call("sendMessage", **payload)
 
 
 def format_run(row) -> str:
