@@ -2,13 +2,14 @@
 Training plan for today → Telegram, on demand: the user sends "?" to the bot,
 a Cloudflare Worker (telegram_worker/worker.js) starts this workflow.
 
-Readiness is decided by fixed rules from Tredict data (overnight HRV, sleep,
-resting HR, training load, recent sessions). The LLM only writes the session
-within the limits those rules allow, so recovery always wins a conflict.
+Recovery data comes from Garmin, or from Tredict if Garmin is unavailable
+(plan_sources.py). Readiness is decided by fixed rules; the LLM only writes the
+session within the limits those rules allow, so recovery always wins a conflict.
 
 Usage:
-    python daily_plan.py             # build and send to Telegram
-    python daily_plan.py --dry-run   # print the message instead of sending
+    python daily_plan.py                    # build and send to Telegram
+    python daily_plan.py --dry-run          # print the message instead of sending
+    python daily_plan.py --source tredict   # force a source (testing)
 """
 
 import argparse
@@ -17,20 +18,17 @@ import re
 import sys
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
-from statistics import mean
-from zoneinfo import ZoneInfo
 
-import tredict
 from llm import ask_groq
+from plan_sources import TZ, Snapshot, garmin_snapshot, hr_zones, tredict_snapshot
 from telegram import tg_send
-
-TZ = ZoneInfo("Europe/Madrid")
 
 GOAL = "марафон быстрее 3:00 (темп 4:15/км)"
 
-# Classification of past sessions, calibrated on Aug-Oct 2026 runs: easy runs
-# give <=108 Tredict effort per hour, interval sessions >=120. Effort alone
-# grows with duration, so a long easy run is not "hard".
+# Classification of past sessions, calibrated on Aug-Oct 2026 runs. Garmin's
+# own training-effect labels call easy runs in the heat TEMPO/THRESHOLD, so
+# they are not used. Tredict effort per hour (when available) separates
+# intervals (>=120) from easy runs (<=108); effort alone grows with duration.
 HARD_EFFORT_PER_H = 120
 HARD_AVG_HR = 152
 HARD_TITLE = re.compile(r"интенсив|интервал|темп|порог|фартлек|\d+\s*[xх×]\s*\d", re.I)
@@ -55,64 +53,6 @@ MONTHS_GEN = ["января", "февраля", "марта", "апреля", "�
               "августа", "сентября", "октября", "ноября", "декабря"]
 
 
-# ── Data ─────────────────────────────────────────────────────────────────────
-
-def ymd(d: date) -> str:
-    return d.strftime("%Y%m%d")
-
-
-def by_day(records: dict) -> dict[date, list]:
-    return {datetime.strptime(k, "%Y%m%d").date(): v for k, v in records.items()}
-
-
-def local_date(ts: str, offset_s: int | None = None) -> date:
-    dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
-    if offset_s is not None:
-        return (dt + timedelta(seconds=offset_s)).date()
-    return dt.astimezone(TZ).date()
-
-
-def fetch_activities() -> list[dict]:
-    """Last ~200 activities (all sports), oldest first."""
-    data = tredict.get("activityList", pageSize=200, extendedSummary=1)
-    acts = []
-    for a in data["_embedded"]["activityList"]:
-        s = a.get("summary") or {}
-        acts.append({
-            "date":  local_date(a["date"]),
-            "sport": a.get("sportType"),
-            "title": a.get("title") or "",
-            "km":    (s.get("distance") or 0) / 1000,
-            "min":   (s.get("duration") or 0) / 60,
-            "pace":  s.get("pace"),          # s/km
-            "hr":    s.get("heartrate"),
-        })
-    return sorted(acts, key=lambda a: a["date"])
-
-
-def fetch_resting_hr() -> dict[date, int]:
-    data = tredict.get("bodyvalues")["bodyvalues"]
-    return {
-        local_date(v["timestamp"], v.get("timezoneOffsetInSeconds")): v["hrRestDynamic"]
-        for v in data if v.get("hrRestDynamic")
-    }
-
-
-def hr_zones() -> dict:
-    """Running HR zones from Tredict; falls back to LT-based zones if the layout is unexpected."""
-    zones = tredict.get("zones", sportType="running")["zones"]["running"]["heartrate"]
-    latest = zones[max(zones)]
-    if len(latest) == 5:
-        z = latest
-        return {"recovery_max": z[0]["to"], "easy": (z[1]["from"], z[1]["to"]),
-                "steady": (z[2]["from"], z[2]["to"]), "threshold": (z[3]["from"], z[3]["to"]),
-                "vo2_min": z[4]["from"]}
-    lt = tredict.get("capacity", sportType="running")["capacity"]["running"][-1]["hrLth"]
-    return {"recovery_max": round(lt * .78), "easy": (round(lt * .79), round(lt * .89)),
-            "steady": (round(lt * .90), round(lt * .95)), "threshold": (round(lt * .96), lt),
-            "vo2_min": lt + 1}
-
-
 # ── Readiness rules ──────────────────────────────────────────────────────────
 
 @dataclass
@@ -133,19 +73,15 @@ class Readiness:
         self.reasons.append(reason)
 
 
-def is_hard(run: dict, effort: float) -> bool:
-    per_hour = effort / (run["min"] / 60) if run["min"] else 0
+def is_hard(run: dict) -> bool:
     title = run["title"].replace("​", "")   # Garmin names may contain zero-width spaces
-    return per_hour >= HARD_EFFORT_PER_H or (run["hr"] or 0) >= HARD_AVG_HR or bool(HARD_TITLE.search(title))
+    return ((run.get("effort_per_h") or 0) >= HARD_EFFORT_PER_H
+            or (run["hr"] or 0) >= HARD_AVG_HR
+            or bool(HARD_TITLE.search(title)))
 
 
 def is_long(run: dict) -> bool:
     return run["km"] >= LONG_KM or run["min"] >= LONG_MIN
-
-
-def fmt_hm(seconds: float) -> str:
-    h, m = divmod(round(seconds / 60), 60)
-    return f"{h} ч {m:02d} мин"
 
 
 def fmt_pace(s: float | None) -> str:
@@ -155,67 +91,28 @@ def fmt_pace(s: float | None) -> str:
     return f"{m}:{sec:02d}/км"
 
 
-def assess(today: date, hrv: dict, sleep: dict, rhr: dict, efforts: dict, runs: list) -> tuple[Readiness, list[str]]:
-    """Returns readiness and human-readable metric lines (already HTML-safe)."""
+def assess(today: date, snap: Snapshot) -> tuple[Readiness, list[str]]:
+    """Returns readiness and metric lines for the message (not yet HTML-escaped)."""
     r = Readiness()
     lines = []
-    past = [x for x in runs if x["date"] < today]
+    past = [x for x in snap.acts if x["sport"] == "running" and x["date"] < today]
+
     warnings = 0   # physiological under-recovery signals; two together mean rest
-
-    # Overnight HRV vs personal baseline (single nights are noisy → also 3-day mean)
-    if today in hrv:
-        rmssd, base = hrv[today]
-        ratios = [hrv[d][0] / hrv[d][1] for d in (today - timedelta(i) for i in range(3))
-                  if d in hrv and hrv[d][1]]
-        r3 = mean(ratios)
-        lines.append(f"ВСР: {rmssd} мс (норма {base})")
-        # A crash (<60%) is red on its own: good nights before it must not mask it
-        if rmssd / base < 0.6 or (rmssd / base < 0.75 and r3 < 0.9):
-            r.cap("red", f"ВСР {rmssd} мс — сильно ниже нормы {base}")
-        elif rmssd / base < 0.85 or r3 < 0.9:
-            r.cap("yellow", f"ВСР ниже нормы ({rmssd} при норме {base})")
-            warnings += 1
-    else:
-        lines.append("ВСР: нет данных за ночь")
-        r.cap("yellow", "нет данных ВСР за ночь — синхронизируй часы")
-
-    if today in sleep:
-        sec, base = sleep[today]
-        lines.append(f"Сон: {fmt_hm(sec)} (норма {fmt_hm(base)})")
-        if sec < 5 * 3600:
-            r.cap("red", f"сон всего {fmt_hm(sec)}")
-        elif sec < 6.5 * 3600 or sec < 0.85 * base:
-            r.cap("yellow", f"сон короче нормы ({fmt_hm(sec)})")
-            warnings += 1
-    else:
-        lines.append("Сон: нет данных за ночь")
-        r.cap("yellow", "нет данных сна — синхронизируй часы")
-
-    if today in rhr:
-        prev = [rhr[today - timedelta(i)] for i in range(1, 15) if today - timedelta(i) in rhr]
-        if prev:
-            norm = mean(prev)
-            lines.append(f"Пульс покоя: {rhr[today]} (норма {norm:.0f})")
-            if rhr[today] - norm >= 8:
-                r.cap("red", f"пульс покоя выше нормы на {rhr[today] - norm:.0f}")
-            elif rhr[today] - norm >= 5:
-                r.cap("yellow", f"пульс покоя выше нормы на {rhr[today] - norm:.0f}")
-                warnings += 1
+    for s in snap.signals:
+        lines.append(s.text)
+        if s.level:
+            r.cap(s.level, s.reason)
+        warnings += s.warning
     if warnings >= 2:
         r.cap("red", "несколько признаков недовосстановления сразу")
 
-    # Acute:chronic training load (Tredict effort, all sports)
-    def load(days: int) -> float:
-        return sum(efforts.get(today - timedelta(i), 0) for i in range(1, days + 1))
-    acute, chronic = load(7), load(28) / 4
-    if chronic:
-        acwr = acute / chronic
-        lines.append(f"Нагрузка неделя/месяц: {acwr:.2f}")
-        # A ramp is an injury risk from intensity first: cut quality, keep easy volume
-        if acwr > 1.8:
-            r.cap("yellow", f"нагрузка за неделю резко выросла ({acwr:.2f})")
-        elif acwr > 1.5:
-            r.no_quality(f"нагрузка за неделю быстро растёт ({acwr:.2f})")
+    # A ramp is an injury risk from intensity first: cut quality, keep easy volume
+    if snap.acwr:
+        lines.append(f"Нагрузка неделя/месяц: {snap.acwr:.2f}")
+        if snap.acwr > 1.8:
+            r.cap("yellow", f"нагрузка за неделю резко выросла ({snap.acwr:.2f})")
+        elif snap.acwr > 1.5:
+            r.no_quality(f"нагрузка за неделю быстро растёт ({snap.acwr:.2f})")
 
     week_km = sum(x["km"] for x in past if x["date"] >= today - timedelta(7))
     month_km = sum(x["km"] for x in past if x["date"] >= today - timedelta(28)) / 4
@@ -234,14 +131,10 @@ def assess(today: date, hrv: dict, sleep: dict, rhr: dict, efforts: dict, runs: 
             r.quality_ok = False
         else:
             r.no_quality(f"{days} дн. после {race} — интенсивность рано")
-        r.long_ok = False
 
-    # Session spacing
-    # Long runs are their own weekly key session, not one of the 2 quality ones
-    hard = [x for x in past if (today - x["date"]).days <= 7
-            and is_hard(x, efforts.get(x["date"], 0)) and not is_long(x)]
-    yesterday = [x for x in past if x["date"] == today - timedelta(1)]
-    if any(is_hard(x, efforts.get(x["date"], 0)) or is_long(x) for x in yesterday):
+    # Session spacing. Long runs are their own weekly key session, not one of the 2 quality ones
+    hard = [x for x in past if (today - x["date"]).days <= 7 and is_hard(x) and not is_long(x)]
+    if any(is_hard(x) or is_long(x) for x in past if x["date"] == today - timedelta(1)):
         r.no_quality("вчера была тяжёлая или длительная тренировка")
     if len(hard) >= 2:
         r.no_quality(f"{len(hard)} интенсивные за 7 дней — лимит недели")
@@ -265,7 +158,7 @@ def assess(today: date, hrv: dict, sleep: dict, rhr: dict, efforts: dict, runs: 
 
     if r.level != "green":
         r.quality_ok = r.long_ok = False
-    return r, [html.escape(x, quote=False) for x in lines]
+    return r, lines
 
 
 # ── Plan text ────────────────────────────────────────────────────────────────
@@ -287,20 +180,21 @@ def allowed_sessions(r: Readiness, z: dict) -> list[str]:
     return options
 
 
-def build_prompt(today: date, r: Readiness, metrics: list[str], z: dict, acts: list, efforts: dict) -> str:
-    recent = [a for a in acts if (today - a["date"]).days <= 14 and a["date"] <= today]
+def build_prompt(today: date, r: Readiness, metrics: list[str], z: dict, snap: Snapshot) -> str:
+    recent = [a for a in snap.acts if (today - a["date"]).days <= 14 and a["date"] <= today]
     history = "\n".join(
         f"- {WEEKDAYS_SHORT[a['date'].weekday()]} {a['date']:%d.%m}: {a['sport']}, {a['km']:.1f} км, "
         f"{a['min']:.0f} мин, темп {fmt_pace(a['pace'])}, пульс {a['hr'] or '—'}, "
-        f"нагрузка {efforts.get(a['date'], 0):.0f}, «{a['title']}»"
+        f"нагрузка {a['load'] or 0:.0f}, «{a['title']}»"
         for a in recent
     ) or "- нет тренировок"
-    runs = [a for a in acts if a["sport"] == "running"]
-    marathons = [a for a in runs if a["km"] >= 42 and (today - a["date"]).days <= 365]
+    marathons = [a for a in snap.acts if a["sport"] == "running" and a["km"] >= 42
+                 and (today - a["date"]).days <= 365]
     best = min(marathons, key=lambda a: a["min"]) if marathons else None
     best_txt = f"{int(best['min'] // 60)}:{int(best['min'] % 60):02d} ({best['date']:%d.%m.%Y})" if best else "нет данных"
-    today_done = [a for a in recent if a["date"] == today]
+    today_done = any(a["date"] == today and a["sport"] == "running" for a in recent)
     options = "\n".join(f"{i}. {o}" for i, o in enumerate(allowed_sessions(r, z), 1))
+    context = "\n".join(f"- {c}" for c in snap.context)
 
     return f"""Ты тренер по бегу. Составь тренировку на сегодня ({WEEKDAYS[today.weekday()]}, {today:%d.%m.%Y}).
 
@@ -313,6 +207,7 @@ def build_prompt(today: date, r: Readiness, metrics: list[str], z: dict, acts: l
 Состояние после сна (решение по готовности уже принято правилами, НЕ повышай интенсивность):
 {chr(10).join('- ' + m for m in metrics)}
 Готовность: {r.level}. Причины ограничений: {'; '.join(r.reasons) or 'нет'}.
+{f"Дополнительно ({snap.source}):{chr(10)}{context}" if context else ""}
 
 Пульсовые зоны: восстановление до {z['recovery_max']}, лёгкая {z['easy'][0]}–{z['easy'][1]},
 средняя {z['steady'][0]}–{z['steady'][1]}, ПАНО {z['threshold'][0]}–{z['threshold'][1]}, МПК от {z['vo2_min']}.
@@ -335,48 +230,60 @@ def build_prompt(today: date, r: Readiness, metrics: list[str], z: dict, acts: l
 Для дня отдыха вместо разминки/заминки кратко опиши, чем заняться. Пиши по-русски, кратко и конкретно."""
 
 
-def build_message(today: date, r: Readiness, metrics: list[str], plan: str) -> str:
-    reasons = "".join(f"\n• {html.escape(x, quote=False)}" for x in r.reasons)
+def build_message(today: date, r: Readiness, metrics: list[str], plan: str, notes: list[str], source: str) -> str:
+    esc = lambda s: html.escape(s, quote=False)
+    reasons = "".join(f"\n• {esc(x)}" for x in r.reasons)
     return "\n".join([
         f"🌅 <b>План на {WEEKDAYS_ACC[today.weekday()]}, {today.day} {MONTHS_GEN[today.month - 1]}</b>",
+        *(esc(n) for n in notes),
         "",
         f"Готовность: {'😴 <b>выходной</b>' if r.day_off else LEVEL_LABEL[r.level]}",
-        *(f"• {m}" for m in metrics),
+        *(f"• {esc(m)}" for m in metrics),
         *([f"\n<b>Ограничения:</b>{reasons}"] if r.reasons else []),
         "",
         "🏃 <b>Тренировка</b>",
-        html.escape("\n".join(line.rstrip() for line in plan.splitlines()), quote=False),
+        esc("\n".join(line.rstrip() for line in plan.splitlines())),
         "",
-        "<i>Боль, недомогание или пульс выше обычного на разминке — снижай нагрузку или отдыхай.</i>",
+        f"<i>Данные: {source}. Боль, недомогание или пульс выше обычного на разминке — снижай нагрузку или отдыхай.</i>",
     ])
 
 
 # ── Main ─────────────────────────────────────────────────────────────────────
 
+def load_snapshot(today: date, source: str, notes: list[str]) -> Snapshot:
+    if source in ("auto", "garmin"):
+        try:
+            return garmin_snapshot(today)
+        except (Exception, SystemExit) as exc:   # SystemExit: Garmin auth failed
+            if source == "garmin":
+                raise
+            print(f"Garmin unavailable, falling back to Tredict: {exc!r}", file=sys.stderr)
+            notes.append("⚠️ Garmin недоступен — план по данным Tredict")
+    return tredict_snapshot(today)   # Tredict auth failure exits 3 → workflow alert
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--dry-run", action="store_true", help="print instead of sending")
     parser.add_argument("--date", type=date.fromisoformat, help="plan for this date (testing)")
+    parser.add_argument("--source", choices=["auto", "garmin", "tredict"], default="auto")
     args = parser.parse_args()
 
     today = args.date or datetime.now(TZ).date()
-    hrv = by_day(tredict.get("hrv")["hrv"])
-    sleep = by_day(tredict.get("sleep")["sleep"])
-    efforts = {d: sum(e[0] for e in v) for d, v in by_day(tredict.get("efforts")["trainingEfforts"]).items()}
-    rhr = fetch_resting_hr()
-    acts = fetch_activities()
-    zones = hr_zones()
+    notes: list[str] = []
+    snap = load_snapshot(today, args.source, notes)
+    zones, zones_note = hr_zones(snap)
+    if zones_note:
+        notes.append(zones_note)
 
-    runs = [a for a in acts if a["sport"] == "running"]
-    readiness, metrics = assess(today, hrv, sleep, rhr, efforts, runs)
-
+    readiness, metrics = assess(today, snap)
     try:
-        plan = ask_groq(build_prompt(today, readiness, metrics, zones, acts, efforts), max_tokens=3000)
+        plan = ask_groq(build_prompt(today, readiness, metrics, zones, snap), max_tokens=3000)
     except RuntimeError as exc:
         # The rules already decided what is safe; send that rather than nothing
         plan = f"⚠️ {exc}. Рекомендация по правилам:\n{allowed_sessions(readiness, zones)[0]}"
 
-    message = build_message(today, readiness, metrics, plan)
+    message = build_message(today, readiness, metrics, plan, notes, snap.source)
     if args.dry_run:
         print(message)
         return

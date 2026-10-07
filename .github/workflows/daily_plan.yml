@@ -43,6 +43,9 @@ jobs:
           echo "exit_code=$code" >> "$GITHUB_OUTPUT"
           exit $code
         env:
+          GARMIN_EMAIL:        ${{ secrets.GARMIN_EMAIL }}
+          GARMIN_PASSWORD:     ${{ secrets.GARMIN_PASSWORD }}
+          GARMINTOKENS:        ${{ secrets.GARMINTOKENS }}
           TREDICT_TOKEN:       ${{ secrets.TREDICT_TOKEN }}
           GROQ_API_KEY:        ${{ secrets.GROQ_API_KEY }}
           TELEGRAM_BOT_TOKEN:  ${{ secrets.TELEGRAM_BOT_TOKEN }}
