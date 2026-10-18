@@ -12,11 +12,10 @@ Usage (normally from the send_workout workflow):
 import argparse
 import html
 import sys
-from datetime import datetime
+from datetime import datetime, timezone
 
 import watch_workout
-from garmin_sync import login
-from plan_sources import TZ, hr_zones
+from plan_sources import garmin_client, hr_zones, local_date_at, local_offset
 from telegram import tg_call, tg_send
 
 
@@ -42,14 +41,16 @@ def main() -> None:
         tg_send(f"⚠️ Не могу разобрать тренировку для часов: {html.escape(str(exc))}")
         sys.exit(1)
 
-    day = datetime.fromtimestamp(args.msg_date, TZ).date()
-    today = datetime.now(TZ).date()
+    # Dates where the athlete is now (follows travel), not a fixed home time zone
+    offset = local_offset()
+    day = local_date_at(datetime.fromtimestamp(args.msg_date, timezone.utc), offset)
+    today = local_date_at(datetime.now(timezone.utc), offset)
     if day != today:
         # Readiness was judged for that morning; today's state may differ
         tg_send(f"⏰ Этот план был на {day:%d.%m}. Пришли <b>?</b> — составлю план на сегодня.")
         return
 
-    client = login()
+    client = garmin_client()
     lt_hr = None
     try:
         lt_hr = ((client.get_lactate_threshold() or {}).get("speed_and_heart_rate") or {}).get("heartRate")

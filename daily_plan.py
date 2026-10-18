@@ -22,7 +22,7 @@ from datetime import date, datetime, timedelta
 import watch_workout
 from cardiac_drift import HARD_TITLE
 from llm import ask_groq
-from plan_sources import TZ, Snapshot, garmin_snapshot, hr_zones, tredict_snapshot
+from plan_sources import Snapshot, garmin_snapshot, hr_zones, local_today, tredict_snapshot
 from telegram import tg_send
 
 GOAL = "марафон быстрее 3:00 (темп 4:15/км)"
@@ -400,7 +400,7 @@ def main() -> None:
     parser.add_argument("--source", choices=["auto", "garmin", "tredict"], default="auto")
     args = parser.parse_args()
 
-    today = args.date or datetime.now(TZ).date()
+    today = args.date or local_today()
     notes: list[str] = []
     snap = load_snapshot(today, args.source, notes)
     zones, zones_note = hr_zones(snap.lt_hr)

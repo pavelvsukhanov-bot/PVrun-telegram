@@ -36,8 +36,9 @@ class Drift:
     v1: float           # m/s, grade-adjusted
     v2: float
     steady: bool        # comparable with other steady runs
+    # Observed weather during the run, set by the caller from weather.py (nearest station)
     temp_c: float | None = None
-    humidity: float | None = None
+    dew_point_c: float | None = None
 
     @property
     def decoupling(self) -> float:
@@ -82,35 +83,25 @@ def analyze(samples: list[dict], title: str = "", km: float = 0) -> Drift | None
 
 
 def for_activity(client, activity_id, title: str = "", km: float = 0) -> Drift | None:
-    """Drift with weather for one Garmin activity; None if too short or unavailable."""
+    """Drift of one Garmin activity; None if too short or unavailable."""
     try:
-        drift = analyze(parse_activity_detail_metrics(client.get_activity_details(str(activity_id))), title, km)
+        return analyze(parse_activity_detail_metrics(client.get_activity_details(str(activity_id))), title, km)
     except Exception as exc:
         print(f"Cardiac drift unavailable for {activity_id}: {exc!r}")
         return None
-    if drift:
-        try:
-            w = client.get_activity_weather(str(activity_id)) or {}
-            if w.get("temp") is not None:
-                drift.temp_c = (w["temp"] - 32) * 5 / 9      # Garmin reports °F
-            drift.humidity = w.get("relativeHumidity")
-        except Exception as exc:
-            print(f"Weather unavailable for {activity_id}: {exc!r}")
-    return drift
 
 
 def grade(decoupling: float) -> str:
     return "✅" if decoupling < 5 else "🟡" if decoupling < 10 else "🔴"
 
 
-def format_lines(d: Drift) -> list[str]:
+def format_lines(d: Drift, weather_line: str | None = None) -> list[str]:
     """Telegram lines for the run message (plain text, no HTML)."""
-    weather = ""
-    if d.temp_c is not None:
-        weather = f" · {d.temp_c:.0f}°C" + (f", влажность {d.humidity:.0f}%" if d.humidity is not None else "")
-    lines = [f"Pa:HR (пульс с учётом темпа): {d.decoupling:.1f}% {grade(d.decoupling)}{weather}"]
+    lines = [f"Pa:HR (пульс с учётом темпа): {d.decoupling:.1f}% {grade(d.decoupling)}"]
     if not d.steady:
         lines.append("Неровная пробежка (интервалы/ускорения) — с лёгкими не сравнивается")
+    if weather_line:
+        lines.append(weather_line)   # heat and humidity explain much of the drift
     return lines
 
 
@@ -121,10 +112,12 @@ def summarize(drifts: list[Drift]) -> dict | None:
         return None
     long_runs = [d for d in steady if d.minutes + WARMUP_S / 60 >= 75]
     temps = [d.temp_c for d in steady if d.temp_c is not None]
+    dews = [d.dew_point_c for d in steady if d.dew_point_c is not None]
     return {
         "n": len(steady),
         "decoupling": median(d.decoupling for d in steady),
         "long_n": len(long_runs),
         "long_decoupling": median(d.decoupling for d in long_runs) if long_runs else None,
         "temp_c": mean(temps) if temps else None,
+        "dew_point_c": mean(dews) if dews else None,
     }

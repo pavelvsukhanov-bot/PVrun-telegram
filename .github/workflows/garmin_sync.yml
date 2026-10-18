@@ -45,6 +45,9 @@ jobs:
           GARMIN_EMAIL:        ${{ secrets.GARMIN_EMAIL }}
           GARMIN_PASSWORD:     ${{ secrets.GARMIN_PASSWORD }}
           GARMINTOKENS:        ${{ secrets.GARMINTOKENS }}
+          AEMET_API_KEY:       ${{ secrets.AEMET_API_KEY }}    # observed weather, Spain
+          ARCHIVE_URL:         ${{ secrets.ARCHIVE_URL }}      # Google Sheet archive (Apps Script)
+          ARCHIVE_TOKEN:       ${{ secrets.ARCHIVE_TOKEN }}
           TELEGRAM_BOT_TOKEN:  ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID:    ${{ secrets.TELEGRAM_CHAT_ID }}
 

@@ -15,7 +15,9 @@ from datetime import date, timedelta
 
 from dotenv import load_dotenv
 
+import archive
 import cardiac_drift
+import weather
 from db import get_conn
 from llm import ask_groq
 from telegram import tg_send
@@ -148,19 +150,37 @@ class DriftMonths:
         return cardiac_drift.summarize([d for _, _, d in self.previous])
 
 
+def archived_weather(start: date, end: date) -> dict[str, tuple]:
+    """(temp, dew point) per run ID from the archive: the nearest station's observation saved at run time."""
+    if not archive.enabled():
+        return {}
+    try:
+        return {str(r["ID"]): (r.get("Температура °C"), r.get("Точка росы °C"))
+                for r in archive.fetch(start, end) if r.get("Температура °C") not in ("", None)}
+    except Exception as exc:
+        print(f"Archive unavailable: {exc!r}")
+        return {}
+
+
 def collect_drift(start: date, end: date) -> DriftMonths:
     """Drift of every 30+ min run in the report month and the month before (from Garmin)."""
-    from garmin_sync import login
-    client = login()
+    from plan_sources import garmin_client
+    client = garmin_client()
     prev_start = (start - timedelta(days=1)).replace(day=1)
+    saved = archived_weather(prev_start, end)
     current, previous = [], []
     for a in client.get_activities_by_date(prev_start.isoformat(), end.isoformat()):
         if "run" not in (a.get("activityType") or {}).get("typeKey", "") or (a.get("duration") or 0) < 30 * 60:
             continue
         day = date.fromisoformat(a["startTimeLocal"][:10])
         drift = cardiac_drift.for_activity(client, a["activityId"], a.get("activityName") or "", (a.get("distance") or 0) / 1000)
-        if drift:
-            (current if day >= start else previous).append((day, a.get("activityName") or "", drift))
+        if not drift:
+            continue
+        if str(a["activityId"]) in saved:
+            drift.temp_c, drift.dew_point_c = (float(v) if v not in ("", None) else None for v in saved[str(a["activityId"])])
+        elif w := weather.for_activity(client, a):   # not archived: best station still available
+            drift.temp_c, drift.dew_point_c = w.temp_c, w.dew_point_c
+        (current if day >= start else previous).append((day, a.get("activityName") or "", drift))
     return DriftMonths(sorted(current, key=lambda x: x[0]), sorted(previous, key=lambda x: x[0]), prev_start.month)
 
 
@@ -181,6 +201,8 @@ def drift_block(dm: DriftMonths) -> list[str]:
         prev_long = f" ({prev_name}: {prev['long_decoupling']:.1f}%)" if prev and prev["long_decoupling"] is not None else ""
         lines.append(f"  Длительные 75+ мин: {cur['long_decoupling']:.1f}% (n={cur['long_n']}){prev_long}")
     temp = f" · ср. {cur['temp_c']:.0f}°C" if cur["temp_c"] is not None else ""
+    if cur["dew_point_c"] is not None:
+        temp += f", точка росы {cur['dew_point_c']:.0f}°C"
     prev_temp = f" ({prev_name}: {prev['temp_c']:.0f}°C)" if prev and prev["temp_c"] is not None else ""
     lines.append(f"  В расчёте: {cur['n']} пробежек{temp}{prev_temp}")
     return lines
@@ -194,10 +216,13 @@ def drift_prompt(dm: DriftMonths | None) -> str:
             return f"{name}: нет ровных пробежек."
         per_run = "; ".join(f"{d:%d.%m} {x.minutes + 10:.0f} мин Pa:HR {x.decoupling:.1f}%"
                             + (f" {x.temp_c:.0f}°C" if x.temp_c is not None else "")
+                            + (f" (точка росы {x.dew_point_c:.0f}°C)" if x.dew_point_c is not None else "")
                             for d, _, x in runs if x.steady)
         long_runs = (f"{summary['long_decoupling']:.1f}% (n={summary['long_n']})"
                      if summary["long_decoupling"] is not None else "длительных 75+ мин в этом месяце не было")
         temp = f"{summary['temp_c']:.0f}°C" if summary["temp_c"] is not None else "—"
+        if summary["dew_point_c"] is not None:
+            temp += f", точка росы {summary['dew_point_c']:.0f}°C"
         return (f"{name}: медиана Pa:HR {summary['decoupling']:.1f}%, "
                 f"длительные {long_runs}, ср. температура {temp}. "
                 f"По пробежкам: {per_run}")

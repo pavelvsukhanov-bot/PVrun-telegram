@@ -11,13 +11,48 @@ daily_plan.py are source-independent.
 """
 
 from dataclasses import dataclass, field
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from statistics import mean
 from zoneinfo import ZoneInfo
 
 import tredict
 
-TZ = ZoneInfo("Europe/Madrid")
+DEFAULT_TZ = ZoneInfo("Europe/Madrid")   # only when Garmin can't tell where the athlete is
+
+_garmin = None
+
+
+def garmin_client():
+    """One Garmin login per process, shared by every module that needs it."""
+    global _garmin
+    if _garmin is None:
+        from garmin_sync import login   # Garmin login only when actually used
+        _garmin = login()
+    return _garmin
+
+
+def local_offset() -> timedelta | None:
+    """UTC offset where the athlete is, from the latest Garmin activity.
+
+    The watch sets its clock from GPS/phone, so its local start time follows
+    travel and moves to another country (the profile time zone is manual and
+    goes stale). A new place is picked up with the first run there.
+    """
+    try:
+        a = garmin_client().get_activities(0, 1)[0]
+        return datetime.fromisoformat(a["startTimeLocal"]) - datetime.fromisoformat(a["startTimeGMT"])
+    except (Exception, SystemExit) as exc:   # SystemExit: Garmin auth failed
+        print(f"Local time unknown, using {DEFAULT_TZ}: {exc!r}")
+        return None
+
+
+def local_date_at(moment: datetime, offset: timedelta | None) -> date:
+    """Calendar date of an aware datetime where the athlete is."""
+    return (moment.astimezone(timezone.utc) + offset).date() if offset is not None else moment.astimezone(DEFAULT_TZ).date()
+
+
+def local_today() -> date:
+    return local_date_at(datetime.now(timezone.utc), local_offset())
 
 PHASE_RU = {"BASE": "база", "BUILD": "развитие", "PEAK": "пик", "TAPER": "подводка", "TARGET_EVENT_DAY": "старт"}
 READINESS_RU = {"PRIME": "отличная", "HIGH": "высокая", "MODERATE": "средняя", "LOW": "низкая", "POOR": "очень низкая"}
@@ -91,8 +126,7 @@ def rhr_signal(today_hr: float, norm: float) -> Signal:
 
 def garmin_snapshot(today: date) -> Snapshot:
     """Raises (or exits) if Garmin is unavailable; the caller falls back to Tredict."""
-    from garmin_sync import login   # Garmin login only when actually used
-    c = login()
+    c = garmin_client()
     d = today.isoformat()
 
     acts = []
@@ -263,11 +297,11 @@ def by_day(records: dict) -> dict[date, list]:
     return {datetime.strptime(k, "%Y%m%d").date(): v for k, v in records.items()}
 
 
-def local_date(ts: str, offset_s: int | None = None) -> date:
+def local_date(ts: str, offset_s: int | None = None, tz_name: str | None = None) -> date:
     dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
     if offset_s is not None:
         return (dt + timedelta(seconds=offset_s)).date()
-    return dt.astimezone(TZ).date()
+    return dt.astimezone(ZoneInfo(tz_name) if tz_name else DEFAULT_TZ).date()
 
 
 def tredict_snapshot(today: date) -> Snapshot:
@@ -276,7 +310,8 @@ def tredict_snapshot(today: date) -> Snapshot:
     acts = []
     for a in tredict.get("activityList", pageSize=200, extendedSummary=1)["_embedded"]["activityList"]:
         s = a.get("summary") or {}
-        day, minutes = local_date(a["date"]), (s.get("duration") or 0) / 60
+        # Tredict stores each activity's own time zone, so trips abroad get the right date
+        day, minutes = local_date(a["date"], tz_name=a.get("timezone")), (s.get("duration") or 0) / 60
         acts.append({
             "date":  day,
             "sport": a.get("sportType"),

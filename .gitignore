@@ -3,3 +3,4 @@ garmin.db
 garmin_tokens/
 __pycache__/
 *.pyc
+google_sheet/*.local.gs
