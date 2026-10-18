@@ -95,6 +95,8 @@ class Aemet:
         return min(((s, km_between(lat, lon, s["lat"], s["lon"])) for s in self._stations), key=lambda x: x[1])
 
     def observe(self, lat: float, lon: float, start: datetime, end: datetime) -> Weather | None:
+        if datetime.now(timezone.utc) - start > timedelta(hours=24):
+            return None   # AEMET keeps only 24 h: don't spend requests (it rate-limits bursts)
         station, dist = self.nearest(lat, lon)
         if dist > MAX_STATION_KM:
             return None   # e.g. abroad: no Spanish station anywhere near
