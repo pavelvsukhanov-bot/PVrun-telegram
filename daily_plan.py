@@ -20,6 +20,7 @@ from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 
 import watch_workout
+from cardiac_drift import HARD_TITLE
 from llm import ask_groq
 from plan_sources import TZ, Snapshot, garmin_snapshot, hr_zones, tredict_snapshot
 from telegram import tg_send
@@ -32,7 +33,6 @@ GOAL = "марафон быстрее 3:00 (темп 4:15/км)"
 # intervals (>=120) from easy runs (<=108); effort alone grows with duration.
 HARD_EFFORT_PER_H = 120
 HARD_AVG_HR = 152
-HARD_TITLE = re.compile(r"интенсив|интервал|темп|порог|фартлек|\d+\s*[xх×]\s*\d", re.I)
 LONG_KM = 16
 LONG_MIN = 90
 RACE_KM = 30            # race-length run → protected recovery window

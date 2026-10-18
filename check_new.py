@@ -15,6 +15,7 @@ from pathlib import Path
 from dotenv import load_dotenv
 
 from garmin_sync import fetch_activities, is_run, login, parse_activity
+import cardiac_drift
 from telegram import format_run, tg_send
 
 load_dotenv()
@@ -61,7 +62,9 @@ def main() -> None:
             continue
 
         print(f"  New run: {row['start_time'][:10]}  {(row['distance_m'] or 0)/1000:.2f} km  {row['name']}")
-        text = format_run(row)
+        # Optional: a run is still reported if its detail data is unavailable
+        drift = cardiac_drift.for_activity(client, row["activity_id"], row["name"] or "", (row["distance_m"] or 0) / 1000)
+        text = format_run(row, cardiac_drift.format_lines(drift) if drift else None)
         if not tg_send(text):
             failed += 1  # not marked as sent → retried next run
             continue

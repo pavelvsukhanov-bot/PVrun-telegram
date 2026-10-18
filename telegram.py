@@ -31,7 +31,7 @@ def tg_send(text: str, reply_markup: dict | None = None) -> bool:
     return tg_call("sendMessage", **payload)
 
 
-def format_run(row) -> str:
+def format_run(row, drift_lines: list[str] | None = None) -> str:
     def pace(s):
         if not s:
             return "—"
@@ -66,4 +66,6 @@ def format_run(row) -> str:
         f"Верт. колебание: {val(row['avg_vert_osc_cm'], ' см')}",
         f"Верт. соотношение:{val(row['avg_vert_ratio_pct'], '%')}",
     ]
+    if drift_lines:
+        lines += ["", "<b>Кардиодрифт</b>", *(html.escape(x, quote=False) for x in drift_lines)]
     return "\n".join(lines)

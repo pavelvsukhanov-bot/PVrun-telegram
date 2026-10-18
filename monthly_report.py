@@ -10,10 +10,12 @@ Usage:
 import argparse
 import html
 import sys
+from dataclasses import dataclass
 from datetime import date, timedelta
 
 from dotenv import load_dotenv
 
+import cardiac_drift
 from db import get_conn
 from llm import ask_groq
 from telegram import tg_send
@@ -129,13 +131,93 @@ def technique_emoji(metric: str, value: float | None) -> str:
 
 # ── AI analysis ───────────────────────────────────────────────────────────────
 
-def generate_ai_analysis(stats: dict, month_name: str) -> str:
+# ── Cardiac drift ─────────────────────────────────────────────────────────────
+
+@dataclass
+class DriftMonths:
+    current: list           # [(date, title, Drift)] for the report month
+    previous: list          # same for the month before
+    prev_month: int
+
+    @property
+    def summary(self) -> dict | None:
+        return cardiac_drift.summarize([d for _, _, d in self.current])
+
+    @property
+    def prev_summary(self) -> dict | None:
+        return cardiac_drift.summarize([d for _, _, d in self.previous])
+
+
+def collect_drift(start: date, end: date) -> DriftMonths:
+    """Drift of every 30+ min run in the report month and the month before (from Garmin)."""
+    from garmin_sync import login
+    client = login()
+    prev_start = (start - timedelta(days=1)).replace(day=1)
+    current, previous = [], []
+    for a in client.get_activities_by_date(prev_start.isoformat(), end.isoformat()):
+        if "run" not in (a.get("activityType") or {}).get("typeKey", "") or (a.get("duration") or 0) < 30 * 60:
+            continue
+        day = date.fromisoformat(a["startTimeLocal"][:10])
+        drift = cardiac_drift.for_activity(client, a["activityId"], a.get("activityName") or "", (a.get("distance") or 0) / 1000)
+        if drift:
+            (current if day >= start else previous).append((day, a.get("activityName") or "", drift))
+    return DriftMonths(sorted(current, key=lambda x: x[0]), sorted(previous, key=lambda x: x[0]), prev_start.month)
+
+
+def drift_block(dm: DriftMonths) -> list[str]:
+    cur, prev = dm.summary, dm.prev_summary
+    if not cur:
+        return ["❤️ <b>Кардиодрифт</b>", "  Нет ровных пробежек от 30 мин для расчёта."]
+    prev_name = MONTHS_RU_GEN[dm.prev_month]
+    trend = ""
+    if prev:
+        delta = cur["decoupling"] - prev["decoupling"]
+        trend = f" ({prev_name}: {prev['decoupling']:.1f}%, {'↓ лучше' if delta < -0.5 else '↑ хуже' if delta > 0.5 else '≈ без изменений'})"
+    lines = [
+        "❤️ <b>Кардиодрифт</b> (ровные пробежки)",
+        f"  Pa:HR медиана:     {cur['decoupling']:.1f}% {cardiac_drift.grade(cur['decoupling'])}{trend}",
+        f"  Пульс 2-й половины: {cur['hr_change']:+.1f}%" + (f" ({prev_name}: {prev['hr_change']:+.1f}%)" if prev else ""),
+    ]
+    if cur["long_decoupling"] is not None:
+        lines.append(f"  Длительные 75+ мин: {cur['long_decoupling']:.1f}% (n={cur['long_n']})")
+    temp = f" · ср. {cur['temp_c']:.0f}°C" if cur["temp_c"] is not None else ""
+    prev_temp = f" ({prev_name}: {prev['temp_c']:.0f}°C)" if prev and prev["temp_c"] is not None else ""
+    lines.append(f"  В расчёте: {cur['n']} пробежек{temp}{prev_temp}")
+    return lines
+
+
+def drift_prompt(dm: DriftMonths | None) -> str:
+    if not dm or not dm.summary:
+        return "Кардиодрифт: нет данных."
+    def month_text(summary: dict | None, runs: list, name: str) -> str:
+        if not summary:
+            return f"{name}: нет ровных пробежек."
+        per_run = "; ".join(f"{d:%d.%m} {x.minutes + 10:.0f} мин Pa:HR {x.decoupling:.1f}%"
+                            + (f" {x.temp_c:.0f}°C" if x.temp_c is not None else "")
+                            for d, _, x in runs if x.steady)
+        long_runs = (f"{summary['long_decoupling']:.1f}% (n={summary['long_n']})"
+                     if summary["long_decoupling"] is not None else "длительных 75+ мин в этом месяце не было")
+        temp = f"{summary['temp_c']:.0f}°C" if summary["temp_c"] is not None else "—"
+        return (f"{name}: медиана Pa:HR {summary['decoupling']:.1f}%, рост пульса во 2-й половине "
+                f"{summary['hr_change']:+.1f}%, длительные {long_runs}, ср. температура {temp}. "
+                f"По пробежкам: {per_run}")
+    return ("Кардиодрифт (ровные лёгкие пробежки от 30 мин, без первых 10 мин; Pa:HR — падение скорости "
+            "на удар пульса во 2-й половине, <5% — хорошая аэробная база):\n"
+            f"- {month_text(dm.summary, dm.current, 'Этот месяц')}\n"
+            f"- {month_text(dm.prev_summary, dm.previous, 'Прошлый месяц')}")
+
+
+def generate_ai_analysis(stats: dict, month_name: str, drift: DriftMonths | None = None) -> str:
     prompt = f"""Ты опытный тренер по бегу. Проанализируй тренировочный месяц бегуна,
 который готовится к марафону, и дай конкретные рекомендации.
 
+Объём и тренировки задаёт адаптивный план Garmin к Milan Marathon 4 апреля 2027 (цель 3:59).
+НЕ назначай свой недельный объём, длительные и интервалы — это делает план. Рекомендации — о технике,
+восстановлении, жаре, кардиодрифте и о том, насколько последовательно выполняется план.
+
 Данные за {month_name}:
 - Пробежек: {stats['total_runs']}
-- Итого км: {stats['total_km']:.1f} км
+- Итого км: {stats['total_km']:.1f} км за {stats['days']} дн. — в среднем {stats['weekly_km']:.0f} км в неделю
 - Самая длинная: {stats['max_km']:.1f} км
 - Средний темп: {fmt_pace(stats['avg_pace_s'])}
 - Лучший темп: {fmt_pace(stats['best_pace_s'])}
@@ -149,6 +231,8 @@ def generate_ai_analysis(stats: dict, month_name: str) -> str:
 - Вертикальное колебание: {fmt_val(stats['avg_vert_osc'], ' см')} (цель: <8 см)
 - Вертикальное соотношение: {fmt_val(stats['avg_vert_ratio'], '%')} (цель: <8%)
 
+{drift_prompt(drift)}
+
 Напиши ответ строго в этом формате (без лишних заголовков):
 
 АНАЛИЗ МЕСЯЦА
@@ -157,23 +241,28 @@ def generate_ai_analysis(stats: dict, month_name: str) -> str:
 ТЕХНИКА БЕГА
 [2–3 предложения: что хорошо, что требует внимания, конкретные наблюдения]
 
+КАРДИОДРИФТ
+[2–3 предложения: как изменился дрейф к прошлому месяцу и почему (объём, длительные, жара/влажность),
+что это говорит об аэробной базе. Если данных нет — пропусти раздел]
+
 РЕКОМЕНДАЦИИ НА СЛЕДУЮЩИЙ МЕСЯЦ
 1. [конкретная рекомендация]
 2. [конкретная рекомендация]
 3. [конкретная рекомендация]
 4. [конкретная рекомендация]
 
-Отвечай на русском языке. Будь конкретным и практичным."""
+Отвечай на русском языке. Будь конкретным и практичным. Без markdown: никаких **, # и списков со звёздочками."""
 
     try:
-        return ask_groq(prompt, max_tokens=700)
+        # Telegram shows markdown literally; the prompt forbids it, this is the safety net
+        return ask_groq(prompt, max_tokens=2000).replace("**", "").replace("__", "")
     except RuntimeError as exc:
         return f"⚠️ {exc} — анализ недоступен."
 
 
 # ── Report builder ────────────────────────────────────────────────────────────
 
-def build_report(stats: dict, month: int, year: int) -> str:
+def build_report(stats: dict, month: int, year: int, drift: DriftMonths | None = None) -> str:
     month_name = f"{MONTHS_RU[month]} {year}"
 
     lines = [
@@ -197,11 +286,12 @@ def build_report(stats: dict, month: int, year: int) -> str:
         f"  Верт. колебание:   {fmt_val(stats['avg_vert_osc'], ' см')} {technique_emoji('vert_osc', stats['avg_vert_osc'])}",
         f"  Верт. соотношение: {fmt_val(stats['avg_vert_ratio'], '%')} {technique_emoji('vert_ratio', stats['avg_vert_ratio'])}",
         "",
+        *(drift_block(drift) + [""] if drift else []),
         "🤖 <b>Анализ и рекомендации</b>",
     ]
 
     # Escape: model output may contain "<" (e.g. "<250 мс"), which breaks Telegram HTML parsing
-    ai_text = generate_ai_analysis(stats, month_name)
+    ai_text = generate_ai_analysis(stats, month_name, drift)
     lines.append(html.escape(ai_text, quote=False))
 
     return "\n".join(lines)
@@ -226,7 +316,14 @@ def main() -> None:
         return
 
     stats = compute_stats(rows)
-    report = build_report(stats, month, year)
+    stats["days"] = (end - start).days + 1
+    stats["weekly_km"] = stats["total_km"] / stats["days"] * 7   # the LLM must not mistake the total for a week
+    drift = None
+    try:
+        drift = collect_drift(start, end)
+    except (Exception, SystemExit) as exc:   # SystemExit: Garmin auth failed — report without drift
+        print(f"Cardiac drift unavailable: {exc!r}")
+    report = build_report(stats, month, year, drift)
 
     print("Sending to Telegram...")
     if not tg_send(report):
