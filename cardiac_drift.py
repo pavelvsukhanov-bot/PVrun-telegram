@@ -38,7 +38,7 @@ class Drift:
     steady: bool        # comparable with other steady runs
     # Observed weather during the run, set by the caller from weather.py (nearest station)
     temp_c: float | None = None
-    dew_point_c: float | None = None
+    wbgt_c: float | None = None
 
     @property
     def decoupling(self) -> float:
@@ -112,12 +112,12 @@ def summarize(drifts: list[Drift]) -> dict | None:
         return None
     long_runs = [d for d in steady if d.minutes + WARMUP_S / 60 >= 75]
     temps = [d.temp_c for d in steady if d.temp_c is not None]
-    dews = [d.dew_point_c for d in steady if d.dew_point_c is not None]
+    wbgts = [d.wbgt_c for d in steady if d.wbgt_c is not None]
     return {
         "n": len(steady),
         "decoupling": median(d.decoupling for d in steady),
         "long_n": len(long_runs),
         "long_decoupling": median(d.decoupling for d in long_runs) if long_runs else None,
         "temp_c": mean(temps) if temps else None,
-        "dew_point_c": mean(dews) if dews else None,
+        "wbgt_c": mean(wbgts) if wbgts else None,
     }

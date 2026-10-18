@@ -151,12 +151,21 @@ class DriftMonths:
 
 
 def archived_weather(start: date, end: date) -> dict[str, tuple]:
-    """(temp, dew point) per run ID from the archive: the nearest station's observation saved at run time."""
+    """(temp, WBGT) per run ID from the archive: the nearest station's observation saved at run time."""
     if not archive.enabled():
         return {}
+    def num(v):
+        return float(v) if v not in ("", None) else None
     try:
-        return {str(r["ID"]): (r.get("Температура °C"), r.get("Точка росы °C"))
-                for r in archive.fetch(start, end) if r.get("Температура °C") not in ("", None)}
+        out = {}
+        for r in archive.fetch(start, end):
+            temp, rh = num(r.get("Температура °C")), num(r.get("Влажность %"))
+            if temp is None:
+                continue
+            # Rows archived before the WBGT column existed: estimate without the sun term
+            wbgt = num(r.get("WBGT °C")) or (weather.wbgt_c(temp, rh, None) if rh else None)
+            out[str(r["ID"])] = (temp, wbgt)
+        return out
     except Exception as exc:
         print(f"Archive unavailable: {exc!r}")
         return {}
@@ -177,9 +186,9 @@ def collect_drift(start: date, end: date) -> DriftMonths:
         if not drift:
             continue
         if str(a["activityId"]) in saved:
-            drift.temp_c, drift.dew_point_c = (float(v) if v not in ("", None) else None for v in saved[str(a["activityId"])])
+            drift.temp_c, drift.wbgt_c = saved[str(a["activityId"])]
         elif w := weather.for_activity(client, a):   # not archived: best station still available
-            drift.temp_c, drift.dew_point_c = w.temp_c, w.dew_point_c
+            drift.temp_c, drift.wbgt_c = w.temp_c, w.wbgt_c
         (current if day >= start else previous).append((day, a.get("activityName") or "", drift))
     return DriftMonths(sorted(current, key=lambda x: x[0]), sorted(previous, key=lambda x: x[0]), prev_start.month)
 
@@ -200,10 +209,10 @@ def drift_block(dm: DriftMonths) -> list[str]:
     if cur["long_decoupling"] is not None:
         prev_long = f" ({prev_name}: {prev['long_decoupling']:.1f}%)" if prev and prev["long_decoupling"] is not None else ""
         lines.append(f"  Длительные 75+ мин: {cur['long_decoupling']:.1f}% (n={cur['long_n']}){prev_long}")
-    temp = f" · ср. {cur['temp_c']:.0f}°C" if cur["temp_c"] is not None else ""
-    if cur["dew_point_c"] is not None:
-        temp += f", точка росы {cur['dew_point_c']:.0f}°C"
-    prev_temp = f" ({prev_name}: {prev['temp_c']:.0f}°C)" if prev and prev["temp_c"] is not None else ""
+    # WBGT is the heat index; temperature alone misses humidity and sun
+    temp = (f" · ср. WBGT {cur['wbgt_c']:.0f}°C {weather.wbgt_flag(cur['wbgt_c'])}"
+            if cur["wbgt_c"] is not None else "")
+    prev_temp = f" ({prev_name}: {prev['wbgt_c']:.0f}°C)" if prev and prev["wbgt_c"] is not None else ""
     lines.append(f"  В расчёте: {cur['n']} пробежек{temp}{prev_temp}")
     return lines
 
@@ -215,19 +224,17 @@ def drift_prompt(dm: DriftMonths | None) -> str:
         if not summary:
             return f"{name}: нет ровных пробежек."
         per_run = "; ".join(f"{d:%d.%m} {x.minutes + 10:.0f} мин Pa:HR {x.decoupling:.1f}%"
-                            + (f" {x.temp_c:.0f}°C" if x.temp_c is not None else "")
-                            + (f" (точка росы {x.dew_point_c:.0f}°C)" if x.dew_point_c is not None else "")
+                            + (f" WBGT {x.wbgt_c:.0f}°C" if x.wbgt_c is not None else "")
                             for d, _, x in runs if x.steady)
         long_runs = (f"{summary['long_decoupling']:.1f}% (n={summary['long_n']})"
                      if summary["long_decoupling"] is not None else "длительных 75+ мин в этом месяце не было")
-        temp = f"{summary['temp_c']:.0f}°C" if summary["temp_c"] is not None else "—"
-        if summary["dew_point_c"] is not None:
-            temp += f", точка росы {summary['dew_point_c']:.0f}°C"
+        temp = f"WBGT {summary['wbgt_c']:.0f}°C" if summary["wbgt_c"] is not None else "—"
         return (f"{name}: медиана Pa:HR {summary['decoupling']:.1f}%, "
-                f"длительные {long_runs}, ср. температура {temp}. "
+                f"длительные {long_runs}, ср. тепловая нагрузка {temp}. "
                 f"По пробежкам: {per_run}")
     return ("Кардиодрифт (ровные лёгкие пробежки от 30 мин, без первых 10 мин; Pa:HR — падение скорости "
-            "на удар пульса во 2-й половине, <5% — хорошая аэробная база):\n"
+            "на удар пульса во 2-й половине, <5% — хорошая аэробная база; WBGT — индекс тепловой нагрузки "
+            "с учётом влажности и солнца, по ACSM: <18 низкий риск, 18–23 умеренный, 23–28 высокий, ≥28 экстремальный):\n"
             f"- {month_text(dm.summary, dm.current, 'Этот месяц')}\n"
             f"- {month_text(dm.prev_summary, dm.previous, 'Прошлый месяц')}")
 
@@ -267,7 +274,7 @@ def generate_ai_analysis(stats: dict, month_name: str, drift: DriftMonths | None
 [2–3 предложения: что хорошо, что требует внимания, конкретные наблюдения]
 
 КАРДИОДРИФТ
-[2–3 предложения: как изменился дрейф к прошлому месяцу и почему (объём, длительные, жара/влажность),
+[2–3 предложения: как изменился дрейф к прошлому месяцу и почему (объём, длительные, тепловая нагрузка WBGT),
 что это говорит об аэробной базе. Если данных нет — пропусти раздел]
 
 РЕКОМЕНДАЦИИ НА СЛЕДУЮЩИЙ МЕСЯЦ

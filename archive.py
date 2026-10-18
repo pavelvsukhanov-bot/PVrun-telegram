@@ -23,7 +23,7 @@ load_dotenv()
 COLUMNS = ["ID", "Дата", "Старт", "UTC-смещение", "Название", "Место", "Широта", "Долгота",
            "Км", "Мин", "Темп /км", "Пульс ср", "Pa:HR %", "Ровная",
            "Температура °C", "Влажность %", "Точка росы °C", "Ветер м/с",
-           "Погода: источник", "Станция", "До станции км"]
+           "Погода: источник", "Станция", "До станции км", "WBGT °C"]
 
 
 def _config() -> tuple[str, str]:
@@ -90,6 +90,7 @@ def run_row(act: dict, drift=None, weather=None) -> dict:
         "Погода: источник": weather.source if weather else "",
         "Станция": weather.station if weather else "",
         "До станции км": _r(weather.station_km) if weather else None,
+        "WBGT °C": _r(weather.wbgt_c) if weather and weather.wbgt_c is not None else None,
     }
 
 
@@ -112,7 +113,7 @@ def main() -> None:
         drift = cardiac_drift.for_activity(client, a["activityId"], a.get("activityName") or "", km)
         rows.append(run_row(a, drift, weather.for_activity(client, a)))
         print(f"  {rows[-1]['Дата']} {rows[-1]['Км']} км  Pa:HR {rows[-1]['Pa:HR %']}  "
-              f"{rows[-1]['Погода: источник']} {rows[-1]['Станция']}")
+              f"WBGT {rows[-1]['WBGT °C']}  {rows[-1]['Погода: источник']} {rows[-1]['Станция']}")
     for i in range(0, len(rows), 50):
         if not upsert(rows[i:i + 50]):
             sys.exit("Archive write failed")

@@ -10,8 +10,12 @@ Providers, nearest station wins:
   it is simply the only provider left when no AEMET station is near.
 Another country's network can be added as one more provider with `observe()`.
 
-Dew point is computed (Magnus formula): for runners it is the best single
-measure of heat stress, better than temperature or humidity alone.
+WBGT is the main heat index. Stations don't measure the globe (sun) term, so
+it is estimated: 0.7 × natural wet bulb (Stull 2011, from temperature and
+humidity) + 0.3 × air temperature + a sun term from the solar elevation at
+the run's place and middle time, assuming clear sky. Clouds are ignored, so
+on overcast days it errs high, on the safe side; expect about ±1.5 °C.
+Flags follow ACSM's WBGT guidance for running.
 """
 
 import math
@@ -28,6 +32,40 @@ MAX_STATION_KM = 25
 OBS_MARGIN = timedelta(minutes=30)   # hourly observations just before the start / after the end count
 
 
+def wet_bulb_c(temp_c: float, rh: float) -> float:
+    """Wet-bulb temperature from air temperature and relative humidity (Stull 2011, ±1 °C)."""
+    return (temp_c * math.atan(0.151977 * (rh + 8.313659) ** 0.5) + math.atan(temp_c + rh)
+            - math.atan(rh - 1.676331) + 0.00391838 * rh ** 1.5 * math.atan(0.023101 * rh) - 4.686035)
+
+
+def sun_elevation_deg(lat: float, lon: float, when: datetime) -> float:
+    """Solar elevation above the horizon (NOAA approximation, ±1°)."""
+    when = when.astimezone(timezone.utc)
+    hour = when.hour + when.minute / 60
+    g = 2 * math.pi / 365 * (when.timetuple().tm_yday - 1 + (hour - 12) / 24)
+    decl = (0.006918 - 0.399912 * math.cos(g) + 0.070257 * math.sin(g) - 0.006758 * math.cos(2 * g)
+            + 0.000907 * math.sin(2 * g) - 0.002697 * math.cos(3 * g) + 0.00148 * math.sin(3 * g))
+    eqtime = 229.18 * (0.000075 + 0.001868 * math.cos(g) - 0.032077 * math.sin(g)
+                       - 0.014615 * math.cos(2 * g) - 0.040849 * math.sin(2 * g))
+    hour_angle = math.radians((hour * 60 + eqtime + 4 * lon) / 4 - 180)
+    lat_r = math.radians(lat)
+    sin_elev = math.sin(lat_r) * math.sin(decl) + math.cos(lat_r) * math.cos(decl) * math.cos(hour_angle)
+    return math.degrees(math.asin(max(-1.0, min(1.0, sin_elev))))
+
+
+def wbgt_c(temp_c: float, rh: float, sun_elev: float | None) -> float:
+    # Clear-sky irradiance falls off at low sun (longer path through the air)
+    s = math.sin(math.radians(sun_elev)) if sun_elev else 0
+    irradiance = 1098 * s * math.exp(-0.057 / s) if s > 0.05 else 0
+    # Globe runs ~0.0125 °C per W/m² above air temperature; its WBGT weight is 0.2
+    return 0.7 * wet_bulb_c(temp_c, rh) + 0.3 * temp_c + 0.0025 * irradiance
+
+
+def wbgt_flag(wbgt: float) -> str:
+    """ACSM heat-risk categories for running."""
+    return "🟢" if wbgt < 18 else "🟡" if wbgt < 23 else "🔴" if wbgt < 28 else "⚫"
+
+
 @dataclass
 class Weather:
     temp_c: float
@@ -36,6 +74,7 @@ class Weather:
     source: str             # "AEMET" / "Garmin"
     station: str
     station_km: float
+    sun_elev: float | None = None   # at the run's middle, degrees
 
     @property
     def dew_point_c(self) -> float | None:
@@ -45,13 +84,16 @@ class Weather:
         g = math.log(self.humidity / 100) + a * self.temp_c / (b + self.temp_c)
         return b * g / (a - g)
 
+    @property
+    def wbgt_c(self) -> float | None:
+        return wbgt_c(self.temp_c, self.humidity, self.sun_elev) if self.humidity else None
+
     def line(self) -> str:
-        parts = [f"{self.temp_c:.0f}°C"]
-        if self.humidity is not None:
-            parts.append(f"влажность {self.humidity:.0f}%")
-        if self.dew_point_c is not None:
-            parts.append(f"точка росы {self.dew_point_c:.0f}°C")
-        return f"🌡 {', '.join(parts)} · {self.source} {self.station} ({self.station_km:.0f} км)"
+        """Message line: WBGT first; the station is kept out of the message (it is in the archive)."""
+        rest = f"{self.temp_c:.0f}°C" + (f", влажность {self.humidity:.0f}%" if self.humidity is not None else "")
+        if self.wbgt_c is None:
+            return f"🌡 {rest}"
+        return f"🌡 WBGT {self.wbgt_c:.0f}°C {wbgt_flag(self.wbgt_c)} · {rest}"
 
 
 def km_between(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
@@ -149,4 +191,9 @@ def for_activity(client, activity: dict) -> Weather | None:
             candidates.append(w)
     except Exception as exc:
         print(f"Garmin weather unavailable: {exc!r}")
-    return min(candidates, key=lambda w: w.station_km) if candidates else None
+    if not candidates:
+        return None
+    best = min(candidates, key=lambda w: w.station_km)
+    if lat is not None:
+        best.sun_elev = sun_elevation_deg(lat, lon, start + (end - start) / 2)
+    return best
