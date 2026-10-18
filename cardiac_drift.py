@@ -3,9 +3,10 @@ Cardiac drift of a run: heart rate and pace in the first vs second half.
 
 The first 10 minutes are skipped (HR is still climbing), stops and walking are
 dropped, and pace is Garmin's grade-adjusted speed so hills don't fake drift.
-Besides the plain HR change, the honest figure is aerobic decoupling (Pa:HR):
-how much the speed-per-heartbeat fell in the second half. Under 5% is a solid
-aerobic base for that duration.
+The reported figure is aerobic decoupling (Pa:HR): how much the
+speed-per-heartbeat fell in the second half. Unlike the plain HR change it is
+not fooled by speeding up or slowing down. Under 5% is a solid aerobic base
+for that duration.
 
 Drift is only comparable between steady runs: interval sessions, runs with
 strides/pickups and races are reported but excluded from monthly trends.
@@ -37,10 +38,6 @@ class Drift:
     steady: bool        # comparable with other steady runs
     temp_c: float | None = None
     humidity: float | None = None
-
-    @property
-    def hr_change(self) -> float:
-        return (self.hr2 - self.hr1) / self.hr1 * 100
 
     @property
     def decoupling(self) -> float:
@@ -106,21 +103,12 @@ def grade(decoupling: float) -> str:
     return "✅" if decoupling < 5 else "🟡" if decoupling < 10 else "🔴"
 
 
-def fmt_pace(v: float) -> str:
-    s = round(1000 / v)
-    return f"{s // 60}:{s % 60:02d}"
-
-
 def format_lines(d: Drift) -> list[str]:
     """Telegram lines for the run message (plain text, no HTML)."""
     weather = ""
     if d.temp_c is not None:
         weather = f" · {d.temp_c:.0f}°C" + (f", влажность {d.humidity:.0f}%" if d.humidity is not None else "")
-    lines = [
-        f"Пульс 1-я / 2-я половина: {d.hr1:.0f} → {d.hr2:.0f} ({d.hr_change:+.1f}%)",
-        f"Темп (с учётом рельефа): {fmt_pace(d.v1)} → {fmt_pace(d.v2)} /км",
-        f"Дрейф Pa:HR: {d.decoupling:.1f}% {grade(d.decoupling)}{weather}",
-    ]
+    lines = [f"Pa:HR (пульс с учётом темпа): {d.decoupling:.1f}% {grade(d.decoupling)}{weather}"]
     if not d.steady:
         lines.append("Неровная пробежка (интервалы/ускорения) — с лёгкими не сравнивается")
     return lines
@@ -136,7 +124,6 @@ def summarize(drifts: list[Drift]) -> dict | None:
     return {
         "n": len(steady),
         "decoupling": median(d.decoupling for d in steady),
-        "hr_change": median(d.hr_change for d in steady),
         "long_n": len(long_runs),
         "long_decoupling": median(d.decoupling for d in long_runs) if long_runs else None,
         "temp_c": mean(temps) if temps else None,

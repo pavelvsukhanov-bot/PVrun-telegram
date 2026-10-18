@@ -176,10 +176,10 @@ def drift_block(dm: DriftMonths) -> list[str]:
     lines = [
         "❤️ <b>Кардиодрифт</b> (ровные пробежки)",
         f"  Pa:HR медиана:     {cur['decoupling']:.1f}% {cardiac_drift.grade(cur['decoupling'])}{trend}",
-        f"  Пульс 2-й половины: {cur['hr_change']:+.1f}%" + (f" ({prev_name}: {prev['hr_change']:+.1f}%)" if prev else ""),
     ]
     if cur["long_decoupling"] is not None:
-        lines.append(f"  Длительные 75+ мин: {cur['long_decoupling']:.1f}% (n={cur['long_n']})")
+        prev_long = f" ({prev_name}: {prev['long_decoupling']:.1f}%)" if prev and prev["long_decoupling"] is not None else ""
+        lines.append(f"  Длительные 75+ мин: {cur['long_decoupling']:.1f}% (n={cur['long_n']}){prev_long}")
     temp = f" · ср. {cur['temp_c']:.0f}°C" if cur["temp_c"] is not None else ""
     prev_temp = f" ({prev_name}: {prev['temp_c']:.0f}°C)" if prev and prev["temp_c"] is not None else ""
     lines.append(f"  В расчёте: {cur['n']} пробежек{temp}{prev_temp}")
@@ -198,8 +198,8 @@ def drift_prompt(dm: DriftMonths | None) -> str:
         long_runs = (f"{summary['long_decoupling']:.1f}% (n={summary['long_n']})"
                      if summary["long_decoupling"] is not None else "длительных 75+ мин в этом месяце не было")
         temp = f"{summary['temp_c']:.0f}°C" if summary["temp_c"] is not None else "—"
-        return (f"{name}: медиана Pa:HR {summary['decoupling']:.1f}%, рост пульса во 2-й половине "
-                f"{summary['hr_change']:+.1f}%, длительные {long_runs}, ср. температура {temp}. "
+        return (f"{name}: медиана Pa:HR {summary['decoupling']:.1f}%, "
+                f"длительные {long_runs}, ср. температура {temp}. "
                 f"По пробежкам: {per_run}")
     return ("Кардиодрифт (ровные лёгкие пробежки от 30 мин, без первых 10 мин; Pa:HR — падение скорости "
             "на удар пульса во 2-й половине, <5% — хорошая аэробная база):\n"
