@@ -51,21 +51,25 @@ function doPost(e) {
   try {
     const sh = sheet_();
     const headers = headers_(sh);
+    // Room for the new rows first, then text format over them: appendRow would ignore the
+    // format and parse "+02:00" as a formula and "09:15" as a time, so rows go in with setValues
+    const free = sh.getMaxRows() - sh.getLastRow();
+    if (free < body.rows.length) sh.insertRowsAfter(sh.getMaxRows(), body.rows.length - free + 100);
     textColumns_(sh, headers);
     const n = sh.getLastRow() - 1;
     const ids = n > 0 ? sh.getRange(2, 1, n, 1).getValues().map(r => String(r[0])) : [];
     let added = 0, updated = 0;
     body.rows.forEach(row => {
       const values = headers.map(h => (row[h] === undefined || row[h] === null) ? '' : row[h]);
-      const i = ids.indexOf(String(row['ID']));
+      let i = ids.indexOf(String(row['ID']));
       if (i >= 0) {
-        sh.getRange(i + 2, 1, 1, values.length).setValues([values]);
         updated++;
       } else {
-        sh.appendRow(values);
         ids.push(String(row['ID']));
+        i = ids.length - 1;
         added++;
       }
+      sh.getRange(i + 2, 1, 1, values.length).setValues([values]);
     });
     return json_({ok: true, added: added, updated: updated});
   } finally {
