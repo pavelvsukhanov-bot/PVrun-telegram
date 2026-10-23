@@ -33,8 +33,10 @@ def tg_send(text: str, reply_markup: dict | None = None) -> bool:
     return tg_call("sendMessage", **payload)
 
 
-def format_run(row, drift_text: str | None = None, weather_line: str | None = None) -> str:
-    """Run card. drift_text: Pa:HR or why drift was not measured; weather_line: observed heat (WBGT)."""
+def format_run(row, drift_text: str | None = None, weather_line: str | None = None,
+               threshold_lines: list[str] | None = None) -> str:
+    """Run card. drift_text: Pa:HR or why drift was not measured; weather_line: observed heat (WBGT);
+    threshold_lines: advice to revise the lactate threshold (only when there is evidence)."""
     def pace(s):
         if not s:
             return "—"
@@ -53,7 +55,7 @@ def format_run(row, drift_text: str | None = None, weather_line: str | None = No
     duration_str = f"{h}:{m:02d}:{s:02d}" if h else f"{m}:{s:02d}"
 
     lines = [
-        f"<b>Пробежка  {row['start_time'][:10]}</b>",
+        f"<b>Пробежка  {row['start_time'][:10]}, {row['start_time'][11:16]}</b>",   # local start time
         f"{html.escape(row['name'] or '', quote=False)}",
         "",
         f"Дистанция:       {dist_km:.2f} км",
@@ -76,4 +78,6 @@ def format_run(row, drift_text: str | None = None, weather_line: str | None = No
         lines.append(html.escape(weather_line, quote=False))
     if drift_text:
         lines.append(f"<b>Кардиодрифт:</b> {html.escape(drift_text, quote=False)}")
+    if threshold_lines:
+        lines += ["", "⚠️ <b>Лактатный порог</b>", *(html.escape(x, quote=False) for x in threshold_lines)]
     return "\n".join(lines)

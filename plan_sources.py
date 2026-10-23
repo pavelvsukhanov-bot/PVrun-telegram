@@ -385,7 +385,10 @@ def zones_from_lt(lt: int) -> dict:
 
 
 def hr_zones(lt_hr: int | None) -> tuple[dict, str | None]:
-    """Tredict zones (set by the athlete); otherwise derived from Garmin's LT heart rate."""
+    """Zones from Garmin's lactate-threshold HR (the athlete keeps it current there);
+    Tredict's zones only when Garmin has none (they were set once and go stale)."""
+    if lt_hr:
+        return zones_from_lt(lt_hr), None
     try:
         zones = tredict.get("zones", sportType="running")["zones"]["running"]["heartrate"]
         z = zones[max(zones)]
@@ -395,6 +398,4 @@ def hr_zones(lt_hr: int | None) -> tuple[dict, str | None]:
                     "vo2_min": z[4]["from"]}, None
     except (Exception, SystemExit) as exc:   # SystemExit: Tredict token rejected
         print(f"Tredict zones unavailable: {exc!r}")
-    if lt_hr:
-        return zones_from_lt(lt_hr), "⚠️ Tredict недоступен — зоны рассчитаны от ПАНО Garmin"
     raise RuntimeError("No HR zones: Tredict and Garmin lactate threshold both unavailable")

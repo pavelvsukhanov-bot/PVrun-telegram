@@ -16,6 +16,7 @@ from dotenv import load_dotenv
 
 import archive
 import cardiac_drift
+import threshold
 import weather
 from garmin_sync import fetch_activities, is_run, parse_activity
 from plan_sources import easy_hr_max, garmin_client
@@ -67,6 +68,21 @@ def archive_runs(client, runs: list, archived: set, easy_max: int | None) -> lis
     return sorted(archived, key=int)[-300:]
 
 
+def threshold_advice(client, act: dict, state: dict):
+    """Lactate-threshold advice for a run that went near threshold; None when there is nothing new to say."""
+    try:
+        lt = threshold.current(client)
+        if not lt or (act.get("maxHR") or 0) < lt.hr - threshold.MAX_HR_GAP:
+            return None   # an easy run adds no threshold evidence
+        finding = threshold.review(client, date.today())
+    except Exception as exc:
+        print(f"Threshold check unavailable: {exc!r}")
+        return None
+    if not finding or not finding.lines or finding.key == state.get("lt_notice"):
+        return None
+    return finding
+
+
 def main() -> None:
     state    = load_state()
     sent_ids = set(state.get("sent_ids", []))
@@ -96,11 +112,15 @@ def main() -> None:
         drift = cardiac_drift.for_activity(client, row["activity_id"], row["name"] or "",
                                            (row["distance_m"] or 0) / 1000, easy_max)
         w = weather.for_activity(client, act)
-        text = format_run(row, cardiac_drift.describe(drift) if drift else None, w.line() if w else None)
+        advice = threshold_advice(client, act, state)
+        text = format_run(row, cardiac_drift.describe(drift) if drift else None, w.line() if w else None,
+                          advice.lines if advice else None)
         if not tg_send(text):
             failed += 1  # not marked as sent → retried next run
             continue
         sent_ids.add(row["activity_id"])
+        if advice:
+            state["lt_notice"] = advice.key   # same advice is not repeated until the evidence or LT changes
         new_count += 1
         time.sleep(1)
 

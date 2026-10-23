@@ -228,7 +228,15 @@ def drift_prompt(dm: DriftMonths | None) -> str:
             f"- {month_text(dm.prev_summary, dm.previous, 'Прошлый месяц')}")
 
 
-def generate_ai_analysis(stats: dict, month_name: str, drift: DriftMonths | None = None) -> str:
+def threshold_prompt(lines: list[str] | None) -> str:
+    if lines:
+        header = "Проверка лактатного порога (рабочие отрезки за 6 недель, отрезки в жару исключены):"
+        return "\n".join([header, *(f"- {x}" for x in lines)])
+    return "Проверка лактатного порога: оснований для пересмотра нет — не давай советов по пересмотру ПАНО."
+
+
+def generate_ai_analysis(stats: dict, month_name: str, drift: DriftMonths | None = None,
+                         threshold_lines: list[str] | None = None) -> str:
     prompt = f"""Ты опытный тренер по бегу. Проанализируй тренировочный месяц бегуна,
 который готовится к марафону, и дай конкретные рекомендации.
 
@@ -253,6 +261,8 @@ def generate_ai_analysis(stats: dict, month_name: str, drift: DriftMonths | None
 - Вертикальное соотношение: {fmt_val(stats['avg_vert_ratio'], '%')} (цель: <8%)
 
 {drift_prompt(drift)}
+
+{threshold_prompt(threshold_lines)}
 
 Напиши ответ строго в этом формате (без лишних заголовков):
 
@@ -283,7 +293,8 @@ def generate_ai_analysis(stats: dict, month_name: str, drift: DriftMonths | None
 
 # ── Report builder ────────────────────────────────────────────────────────────
 
-def build_report(stats: dict, month: int, year: int, drift: DriftMonths | None = None) -> str:
+def build_report(stats: dict, month: int, year: int, drift: DriftMonths | None = None,
+                 threshold_lines: list[str] | None = None) -> str:
     month_name = f"{MONTHS_RU[month]} {year}"
 
     lines = [
@@ -308,11 +319,14 @@ def build_report(stats: dict, month: int, year: int, drift: DriftMonths | None =
         f"  Верт. соотношение: {fmt_val(stats['avg_vert_ratio'], '%')} {color('vert_ratio', stats['avg_vert_ratio'])}",
         "",
         *(drift_block(drift) + [""] if drift else []),
+        # Only when the threshold set in Garmin disagrees with the athlete's threshold work
+        *(["⚠️ <b>Лактатный порог</b>", *(f"  {html.escape(x, quote=False)}" for x in threshold_lines), ""]
+          if threshold_lines else []),
         "🤖 <b>Анализ и рекомендации</b>",
     ]
 
     # Escape: model output may contain "<" (e.g. "<250 мс"), which breaks Telegram HTML parsing
-    ai_text = generate_ai_analysis(stats, month_name, drift)
+    ai_text = generate_ai_analysis(stats, month_name, drift, threshold_lines)
     lines.append(html.escape(ai_text, quote=False))
 
     return "\n".join(lines)
@@ -344,7 +358,15 @@ def main() -> None:
         drift = collect_drift(start, end)
     except (Exception, SystemExit) as exc:   # SystemExit: Garmin auth failed — report without drift
         print(f"Cardiac drift unavailable: {exc!r}")
-    report = build_report(stats, month, year, drift)
+    threshold_lines = None
+    try:
+        import threshold
+        from plan_sources import garmin_client
+        finding = threshold.review(garmin_client(), end)
+        threshold_lines = finding.lines if finding else None
+    except (Exception, SystemExit) as exc:
+        print(f"Threshold check unavailable: {exc!r}")
+    report = build_report(stats, month, year, drift, threshold_lines)
 
     print("Sending to Telegram...")
     if not tg_send(report):
