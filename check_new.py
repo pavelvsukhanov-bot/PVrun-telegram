@@ -17,7 +17,8 @@ from dotenv import load_dotenv
 import archive
 import cardiac_drift
 import weather
-from garmin_sync import fetch_activities, is_run, login, parse_activity
+from garmin_sync import fetch_activities, is_run, parse_activity
+from plan_sources import easy_hr_max, garmin_client
 from telegram import format_run, tg_send
 
 load_dotenv()
@@ -43,7 +44,7 @@ def save_state(state: dict) -> None:
     )
 
 
-def archive_runs(client, runs: list, archived: set) -> list:
+def archive_runs(client, runs: list, archived: set, easy_max: int | None) -> list:
     """Writes runs to the Google Sheet archive once observed weather covers them.
 
     AEMET publishes hourly observations ~2 h late and keeps only 24 h, so a run
@@ -58,7 +59,7 @@ def archive_runs(client, runs: list, archived: set) -> list:
         if aid in archived or now - start - timedelta(seconds=act.get("elapsedDuration") or 0) < ARCHIVE_DELAY:
             continue
         km = (act.get("distance") or 0) / 1000
-        drift = cardiac_drift.for_activity(client, aid, act.get("activityName") or "", km)
+        drift = cardiac_drift.for_activity(client, aid, act.get("activityName") or "", km, easy_max)
         rows.append(archive.run_row(act, drift, weather.for_activity(client, act)))
     if rows and archive.upsert(rows):
         archived |= {r["ID"] for r in rows}
@@ -71,7 +72,8 @@ def main() -> None:
     sent_ids = set(state.get("sent_ids", []))
 
     # tokenstore=None → login() reads GARMINTOKENS env var automatically
-    client = login()
+    client = garmin_client()
+    easy_max = None   # top of the easy HR zone: fetched only when there is a run to judge
 
     end   = date.today()
     start = end - timedelta(days=LOOKBACK_DAYS)
@@ -90,9 +92,11 @@ def main() -> None:
 
         print(f"  New run: {row['start_time'][:10]}  {(row['distance_m'] or 0)/1000:.2f} km  {row['name']}")
         # Optional: a run is still reported if its detail data is unavailable
-        drift = cardiac_drift.for_activity(client, row["activity_id"], row["name"] or "", (row["distance_m"] or 0) / 1000)
+        easy_max = easy_max or easy_hr_max()
+        drift = cardiac_drift.for_activity(client, row["activity_id"], row["name"] or "",
+                                           (row["distance_m"] or 0) / 1000, easy_max)
         w = weather.for_activity(client, act)
-        text = format_run(row, cardiac_drift.format_lines(drift, w.line() if w else None) if drift else None)
+        text = format_run(row, cardiac_drift.describe(drift) if drift else None, w.line() if w else None)
         if not tg_send(text):
             failed += 1  # not marked as sent → retried next run
             continue
@@ -103,7 +107,10 @@ def main() -> None:
     print(f"Sent {new_count} new run(s) to Telegram.")
 
     if archive.enabled():
-        state["archived_ids"] = archive_runs(client, runs, set(state.get("archived_ids", [])))
+        archived = set(state.get("archived_ids", []))
+        if any(str(a["activityId"]) not in archived for a in runs):
+            easy_max = easy_max or easy_hr_max()
+        state["archived_ids"] = archive_runs(client, runs, archived, easy_max)
 
     # Garmin IDs grow over time: sorting keeps the file stable between runs
     # (no noise commits) and the cap drops the oldest IDs, not random ones.

@@ -6,6 +6,8 @@ import os
 import requests
 from dotenv import load_dotenv
 
+from running_dynamics import color
+
 load_dotenv()
 
 
@@ -31,7 +33,8 @@ def tg_send(text: str, reply_markup: dict | None = None) -> bool:
     return tg_call("sendMessage", **payload)
 
 
-def format_run(row, drift_lines: list[str] | None = None) -> str:
+def format_run(row, drift_text: str | None = None, weather_line: str | None = None) -> str:
+    """Run card. drift_text: Pa:HR or why drift was not measured; weather_line: observed heat (WBGT)."""
     def pace(s):
         if not s:
             return "—"
@@ -60,12 +63,17 @@ def format_run(row, drift_lines: list[str] | None = None) -> str:
         f"Калории:         {int(row['calories'] or 0)} ккал",
         "",
         "<b>Беговая динамика</b>",
-        f"Каденс:          {val(row['avg_cadence'], ' ш/мин', 0)}",
-        f"ВКЗ:             {val(row['avg_gct_ms'], ' мс', 0)}",
+        # Colours as in Garmin Connect (stride length has no band)
+        f"Каденс:          {val(row['avg_cadence'], ' ш/мин', 0)} {color('cadence', row['avg_cadence'])}",
+        f"ВКЗ:             {val(row['avg_gct_ms'], ' мс', 0)} {color('gct', row['avg_gct_ms'])}",
         f"Длина шага:      {val(row['avg_stride_length_cm'], ' см', 0)}",
-        f"Верт. колебание: {val(row['avg_vert_osc_cm'], ' см')}",
-        f"Верт. соотношение:{val(row['avg_vert_ratio_pct'], '%')}",
+        f"Верт. колебание: {val(row['avg_vert_osc_cm'], ' см')} {color('vert_osc', row['avg_vert_osc_cm'])}",
+        f"Верт. соотношение:{val(row['avg_vert_ratio_pct'], '%')} {color('vert_ratio', row['avg_vert_ratio_pct'])}",
     ]
-    if drift_lines:
-        lines += ["", "<b>Кардиодрифт</b>", *(html.escape(x, quote=False) for x in drift_lines)]
+    if weather_line or drift_text:
+        lines.append("")
+    if weather_line:
+        lines.append(html.escape(weather_line, quote=False))
+    if drift_text:
+        lines.append(f"<b>Кардиодрифт:</b> {html.escape(drift_text, quote=False)}")
     return "\n".join(lines)

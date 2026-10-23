@@ -26,6 +26,10 @@ COLUMNS = ["ID", "Дата", "Старт", "UTC-смещение", "Назван
            "Погода: источник", "Станция", "До станции км", "WBGT °C"]
 
 
+KIND_RU = {"interval": "интервальная", "intensive": "интенсивная", "unsteady": "неровный темп",
+           "short": "короткая", "race": "забег"}
+
+
 def _config() -> tuple[str, str]:
     return os.environ.get("ARCHIVE_URL", "").strip(), os.environ.get("ARCHIVE_TOKEN", "").strip()
 
@@ -82,7 +86,8 @@ def run_row(act: dict, drift=None, weather=None) -> dict:
         "Темп /км": f"{pace // 60}:{pace % 60:02d}" if pace else "",
         "Пульс ср": _r(act.get("averageHR"), 0),
         "Pa:HR %": _r(drift.decoupling) if drift else None,
-        "Ровная": ("да" if drift.steady else "нет") if drift else "",
+        # Calm run with drift measured, or the kind of session that rules drift out
+        "Ровная": ("да" if drift.steady else KIND_RU[drift.kind]) if drift else "",
         "Температура °C": _r(weather.temp_c) if weather else None,
         "Влажность %": _r(weather.humidity, 0) if weather else None,
         "Точка росы °C": _r(weather.dew_point_c) if weather else None,
@@ -103,14 +108,15 @@ def main() -> None:
 
     import cardiac_drift
     import weather
-    from plan_sources import garmin_client
+    from plan_sources import easy_hr_max, garmin_client
     client = garmin_client()
+    easy_max = easy_hr_max()
     acts = [a for a in client.get_activities_by_date(args.backfill.isoformat(), date.today().isoformat())
             if "run" in (a.get("activityType") or {}).get("typeKey", "")]
     rows = []
     for a in sorted(acts, key=lambda a: a["startTimeGMT"]):
         km = (a.get("distance") or 0) / 1000
-        drift = cardiac_drift.for_activity(client, a["activityId"], a.get("activityName") or "", km)
+        drift = cardiac_drift.for_activity(client, a["activityId"], a.get("activityName") or "", km, easy_max)
         rows.append(run_row(a, drift, weather.for_activity(client, a)))
         print(f"  {rows[-1]['Дата']} {rows[-1]['Км']} км  Pa:HR {rows[-1]['Pa:HR %']}  "
               f"WBGT {rows[-1]['WBGT °C']}  {rows[-1]['Погода: источник']} {rows[-1]['Станция']}")

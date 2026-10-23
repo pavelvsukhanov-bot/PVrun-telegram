@@ -44,6 +44,7 @@ jobs:
           GARMIN_EMAIL:        ${{ secrets.GARMIN_EMAIL }}       # cardiac drift from activity details
           GARMIN_PASSWORD:     ${{ secrets.GARMIN_PASSWORD }}
           GARMINTOKENS:        ${{ secrets.GARMINTOKENS }}
+          TREDICT_TOKEN:       ${{ secrets.TREDICT_TOKEN }}    # HR zones: is a run calm enough for drift
           AEMET_API_KEY:       ${{ secrets.AEMET_API_KEY }}    # observed weather, Spain
           ARCHIVE_URL:         ${{ secrets.ARCHIVE_URL }}      # Google Sheet archive (Apps Script)
           ARCHIVE_TOKEN:       ${{ secrets.ARCHIVE_TOKEN }}

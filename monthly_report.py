@@ -20,6 +20,7 @@ import cardiac_drift
 import weather
 from db import get_conn
 from llm import ask_groq
+from running_dynamics import color   # same colours as the run card and Garmin Connect
 from telegram import tg_send
 
 load_dotenv()
@@ -117,20 +118,6 @@ def fmt_val(v, unit="", decimals=1) -> str:
     return f"{v:.{decimals}f}{unit}"
 
 
-def technique_emoji(metric: str, value: float | None) -> str:
-    """Returns ✅ / ⚠️ / ❌ based on marathon training guidelines."""
-    if value is None:
-        return ""
-    if metric == "cadence":  # higher is better
-        return "✅" if value >= 170 else "⚠️" if value >= 160 else "❌"
-    # lower is better: (ok below, warning below)
-    limits = {"gct": (250, 280), "vert_osc": (8.0, 10.0), "vert_ratio": (8.0, 10.0)}
-    if metric not in limits:
-        return ""
-    low, high = limits[metric]
-    return "✅" if value < low else "⚠️" if value < high else "❌"
-
-
 # ── AI analysis ───────────────────────────────────────────────────────────────
 
 # ── Cardiac drift ─────────────────────────────────────────────────────────────
@@ -173,8 +160,9 @@ def archived_weather(start: date, end: date) -> dict[str, tuple]:
 
 def collect_drift(start: date, end: date) -> DriftMonths:
     """Drift of every 30+ min run in the report month and the month before (from Garmin)."""
-    from plan_sources import garmin_client
+    from plan_sources import easy_hr_max, garmin_client
     client = garmin_client()
+    easy_max = easy_hr_max()
     prev_start = (start - timedelta(days=1)).replace(day=1)
     saved = archived_weather(prev_start, end)
     current, previous = [], []
@@ -182,7 +170,8 @@ def collect_drift(start: date, end: date) -> DriftMonths:
         if "run" not in (a.get("activityType") or {}).get("typeKey", "") or (a.get("duration") or 0) < 30 * 60:
             continue
         day = date.fromisoformat(a["startTimeLocal"][:10])
-        drift = cardiac_drift.for_activity(client, a["activityId"], a.get("activityName") or "", (a.get("distance") or 0) / 1000)
+        drift = cardiac_drift.for_activity(client, a["activityId"], a.get("activityName") or "",
+                                           (a.get("distance") or 0) / 1000, easy_max)
         if not drift:
             continue
         if str(a["activityId"]) in saved:
@@ -312,11 +301,11 @@ def build_report(stats: dict, month: int, year: int, drift: DriftMonths | None =
         f"  Калории итого:     {int(stats['total_cal'])} ккал",
         "",
         "⚙️ <b>Техника бега</b>",
-        f"  Каденс:            {fmt_val(stats['avg_cadence'], ' ш/мин', 0)} {technique_emoji('cadence', stats['avg_cadence'])}",
-        f"  ВКЗ:               {fmt_val(stats['avg_gct'], ' мс', 0)} {technique_emoji('gct', stats['avg_gct'])}",
+        f"  Каденс:            {fmt_val(stats['avg_cadence'], ' ш/мин', 0)} {color('cadence', stats['avg_cadence'])}",
+        f"  ВКЗ:               {fmt_val(stats['avg_gct'], ' мс', 0)} {color('gct', stats['avg_gct'])}",
         f"  Длина шага:        {fmt_val(stats['avg_stride'], ' см', 0)}",
-        f"  Верт. колебание:   {fmt_val(stats['avg_vert_osc'], ' см')} {technique_emoji('vert_osc', stats['avg_vert_osc'])}",
-        f"  Верт. соотношение: {fmt_val(stats['avg_vert_ratio'], '%')} {technique_emoji('vert_ratio', stats['avg_vert_ratio'])}",
+        f"  Верт. колебание:   {fmt_val(stats['avg_vert_osc'], ' см')} {color('vert_osc', stats['avg_vert_osc'])}",
+        f"  Верт. соотношение: {fmt_val(stats['avg_vert_ratio'], '%')} {color('vert_ratio', stats['avg_vert_ratio'])}",
         "",
         *(drift_block(drift) + [""] if drift else []),
         "🤖 <b>Анализ и рекомендации</b>",

@@ -364,6 +364,20 @@ def tredict_snapshot(today: date) -> Snapshot:
 
 # ── HR zones ─────────────────────────────────────────────────────────────────
 
+def easy_hr_max() -> int | None:
+    """Top of the athlete's easy HR zone (Tredict zones, else from Garmin's LT); None if unknown."""
+    lt = None
+    try:
+        lt = ((garmin_client().get_lactate_threshold() or {}).get("speed_and_heart_rate") or {}).get("heartRate")
+    except (Exception, SystemExit) as exc:
+        print(f"Garmin lactate threshold unavailable: {exc!r}")
+    try:
+        return hr_zones(lt)[0]["easy"][1]
+    except Exception as exc:
+        print(f"HR zones unavailable: {exc!r}")
+        return None
+
+
 def zones_from_lt(lt: int) -> dict:
     return {"recovery_max": round(lt * .78), "easy": (round(lt * .79), round(lt * .89)),
             "steady": (round(lt * .90), round(lt * .95)), "threshold": (round(lt * .96), lt),
