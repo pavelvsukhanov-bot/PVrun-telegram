@@ -10,8 +10,10 @@ evidence is consistent:
   threshold HR along the heart-rate reserve,
       x_at_LTHR = x × (LTHR − HRrest) / (HR − HRrest),
   only for intervals within 8 bpm of LTHR, so the projection stays short;
-- a recommendation needs ≥3 intervals from ≥2 sessions and a median gap
-  beyond the tolerance (pace 4%, power 5%);
+- a recommendation needs ≥3 intervals from ≥2 sessions, a median gap beyond
+  the tolerance (pace 4%, power 5%) and ≥75% of intervals on the same side;
+- threshold pace can't be typed into Garmin (it comes from its LT
+  detection), so pace advice is to run the watch's lactate threshold test;
 - threshold HR: a continuous ≥20 min interval held ≥3 bpm above LTHR means
   LTHR is set too low (the core of Friel's 30-minute field test).
 """
@@ -31,6 +33,7 @@ MAX_HR_GAP = 8
 PACE_TOL = 0.04
 POWER_TOL = 0.05
 MIN_REPS, MIN_SESSIONS = 3, 2
+AGREEMENT = 0.75        # share of intervals that must sit on the same side of the setting
 HOT_WBGT = 23
 RACE_KM = 30
 
@@ -41,7 +44,8 @@ class Threshold:
     speed: float            # m/s
     power: float | None     # W
     hr_auto: bool           # Garmin updates LTHR itself
-    version: str            # changes whenever any value is re-set
+    hr_version: str         # changes when HR/pace are re-set (they change together)
+    power_version: str      # changes when power is re-set
 
 
 @dataclass
@@ -68,7 +72,8 @@ def current(client) -> Threshold | None:
         speed=sh["speed"] * 10,     # Garmin stores m/s divided by 10 (0.3167 → 3.17 m/s = 5:16/km)
         power=pw.get("functionalThresholdPower"),
         hr_auto=bool(profile.get("thresholdHeartRateAutoDetected")),
-        version=f"{sh.get('version')}/{pw.get('ftpCreateTime')}",
+        hr_version=str(sh.get("version")),
+        power_version=str(pw.get("ftpCreateTime")),
     )
 
 
@@ -99,8 +104,11 @@ def work_reps(samples: list[dict], lt: Threshold) -> list[Rep]:
 
 @dataclass
 class Finding:
-    lines: list[str]        # plain-text recommendations, empty = nothing to say
-    key: str                # identifies the advice, to avoid repeating it
+    items: list[tuple[str, str]]   # (key, text); the key changes with the LT setting, so advice can return
+
+    @property
+    def lines(self) -> list[str]:
+        return [text for _, text in self.items]
 
 
 def check(client, today: date, lt: Threshold, rest_hr: float, wbgt_by_id: dict | None = None) -> Finding:
@@ -130,31 +138,39 @@ def check(client, today: date, lt: Threshold, rest_hr: float, wbgt_by_id: dict |
                 powers.append(r.power * k)
             sessions.add(a["activityId"])
 
-    lines, key = [], []
+    items = []      # (advice key, text)
     enough = len(speeds) >= MIN_REPS and len(sessions) >= MIN_SESSIONS
-    basis = f"по {len(speeds)} рабочим отрезкам из {len(sessions)} тренировок за {LOOKBACK_DAYS // 7} недель"
+    basis = f"{len(speeds)} рабочих отрезков из {len(sessions)} тренировок за {LOOKBACK_DAYS // 7} недель"
     if enough:
         v = median(speeds)
-        if abs(v / lt.speed - 1) > PACE_TOL:
-            faster = v > lt.speed
-            lines.append(f"Темп ПАНО: {basis} на пульсе {lt.hr} выходит ≈{fmt_pace(v)}/км, "
-                         f"а в Garmin стоит {fmt_pace(lt.speed)}/км — рассмотри "
-                         f"{'ускорить' if faster else 'замедлить'} пороговый темп.")
-            key.append(f"pace:{'up' if faster else 'down'}")
+        faster = v > lt.speed
+        if abs(v / lt.speed - 1) > PACE_TOL and _agree(speeds, lt.speed, faster):
+            # Garmin derives threshold pace itself (it can't be typed in): only its LT test updates it
+            items.append((f"pace:{'up' if faster else 'down'}",
+                          f"Темп ПАНО: на пульсе {lt.hr} ты бежишь ≈{fmt_pace(v)}/км ({basis}), "
+                          f"а Garmin считает пороговым {fmt_pace(lt.speed)}/км. Вручную темп не меняется — "
+                          f"пройди на часах тест на лактатный порог с нагрудным датчиком: он обновит и пульс, и темп."))
         if lt.power and len(powers) >= MIN_REPS:
             p = median(powers)
-            if abs(p / lt.power - 1) > POWER_TOL:
-                higher = p > lt.power
-                lines.append(f"Мощность ПАНО: на пульсе {lt.hr} выходит ≈{p:.0f} Вт, а в Garmin стоит "
-                             f"{lt.power:.0f} Вт — рассмотри {'повысить' if higher else 'понизить'} пороговую мощность.")
-                key.append(f"power:{'up' if higher else 'down'}")
+            higher = p > lt.power
+            if abs(p / lt.power - 1) > POWER_TOL and _agree(powers, lt.power, higher):
+                items.append((f"power:{'up' if higher else 'down'}",
+                              f"Мощность ПАНО: на пульсе {lt.hr} выходит ≈{p:.0f} Вт, а в Garmin стоит "
+                              f"{lt.power:.0f} Вт — рассмотри {'повысить' if higher else 'понизить'} пороговую мощность."))
     if long_above:
         r = max(long_above, key=lambda r: r.hr)
         auto = " (у тебя включено автоопределение — Garmin может обновить его сам)" if lt.hr_auto else ""
-        lines.append(f"Пульс ПАНО: {r.seconds / 60:.0f} мин непрерывно с пульсом {r.hr:.0f} при пороговом "
-                     f"{lt.hr} — рассмотри повысить пульс ПАНО{auto}.")
-        key.append("hr:up")
-    return Finding(lines, f"{lt.version}:{','.join(key)}")
+        items.append(("hr:up", f"Пульс ПАНО: {r.seconds / 60:.0f} мин непрерывно с пульсом {r.hr:.0f} при пороговом "
+                               f"{lt.hr} — рассмотри повысить пульс ПАНО{auto}."))
+    # Advice is keyed to the setting it is about: re-setting power doesn't repeat the pace advice
+    return Finding([(f"{lt.power_version if k.startswith('power') else lt.hr_version}:{k}", text)
+                    for k, text in items])
+
+
+def _agree(values: list[float], setting: float, above: bool) -> bool:
+    """Most intervals point the same way: a median pulled by a few outliers is not evidence."""
+    same_side = sum((x > setting) == above for x in values)
+    return same_side >= AGREEMENT * len(values)
 
 
 def review(client, today: date) -> Finding | None:

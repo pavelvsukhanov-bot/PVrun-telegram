@@ -17,6 +17,7 @@ from dotenv import load_dotenv
 import archive
 import cardiac_drift
 import threshold
+from garminconnect.activity_details import parse_activity_detail_metrics
 import weather
 from garmin_sync import fetch_activities, is_run, parse_activity
 from plan_sources import easy_hr_max, garmin_client
@@ -68,19 +69,22 @@ def archive_runs(client, runs: list, archived: set, easy_max: int | None) -> lis
     return sorted(archived, key=int)[-300:]
 
 
-def threshold_advice(client, act: dict, state: dict):
-    """Lactate-threshold advice for a run that went near threshold; None when there is nothing new to say."""
+def threshold_advice(client, act: dict, state: dict) -> list[tuple[str, str]]:
+    """New lactate-threshold advice after a session with threshold work; [] when there is nothing new."""
     try:
         lt = threshold.current(client)
-        if not lt or (act.get("maxHR") or 0) < lt.hr - threshold.MAX_HR_GAP:
-            return None   # an easy run adds no threshold evidence
+        if not lt:
+            return []
+        # Only work intervals are evidence: a high max HR from strides on an easy run is not
+        samples = parse_activity_detail_metrics(client.get_activity_details(str(act["activityId"])))
+        if not threshold.work_reps(samples, lt):
+            return []
         finding = threshold.review(client, date.today())
     except Exception as exc:
         print(f"Threshold check unavailable: {exc!r}")
-        return None
-    if not finding or not finding.lines or finding.key == state.get("lt_notice"):
-        return None
-    return finding
+        return []
+    told = set(state.get("lt_notified", []))
+    return [(k, text) for k, text in (finding.items if finding else []) if k not in told]
 
 
 def main() -> None:
@@ -114,13 +118,15 @@ def main() -> None:
         w = weather.for_activity(client, act)
         advice = threshold_advice(client, act, state)
         text = format_run(row, cardiac_drift.describe(drift) if drift else None, w.line() if w else None,
-                          advice.lines if advice else None)
+                          [text for _, text in advice] or None)
         if not tg_send(text):
             failed += 1  # not marked as sent → retried next run
             continue
         sent_ids.add(row["activity_id"])
         if advice:
-            state["lt_notice"] = advice.key   # same advice is not repeated until the evidence or LT changes
+            # Each piece of advice once per threshold setting: it returns only after the LT changes
+            state["lt_notified"] = (state.get("lt_notified", []) + [k for k, _ in advice])[-20:]
+            state.pop("lt_notice", None)
         new_count += 1
         time.sleep(1)
 
