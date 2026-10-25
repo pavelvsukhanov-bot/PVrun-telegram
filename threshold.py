@@ -149,7 +149,7 @@ def check(client, today: date, lt: Threshold, rest_hr: float, wbgt_by_id: dict |
             items.append((f"pace:{'up' if faster else 'down'}",
                           f"Темп ПАНО: на пульсе {lt.hr} ты бежишь ≈{fmt_pace(v)}/км ({basis}), "
                           f"а Garmin считает пороговым {fmt_pace(lt.speed)}/км. Вручную темп не меняется — "
-                          f"пройди на часах тест на лактатный порог с нагрудным датчиком: он обновит и пульс, и темп."))
+                          f"пройди на часах тест на лактатный порог: он обновит и пульс, и темп."))
         if lt.power and len(powers) >= MIN_REPS:
             p = median(powers)
             higher = p > lt.power
