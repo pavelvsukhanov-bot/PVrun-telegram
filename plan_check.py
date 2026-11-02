@@ -115,13 +115,18 @@ def upcoming(c, today: date) -> tuple[str, list[dict]]:
         def walk(o, path=""):
             if isinstance(o, dict):
                 for k, v in o.items():
-                    if k not in ("taskList", "adaptivePlanPhases"):
-                        walk(v, f"{path}.{k}")
+                    walk(v, f"{path}.{k}")
             elif isinstance(o, (int, float)) and not isinstance(o, bool):
                 print("KEY", path, o if 3000 <= o <= 30000 else "")
             else:
                 print("KEY", path)
-        walk(plan)
+        for i in (c.get_scheduled_workouts(2027, 4) or {}).get("calendarItems", []):
+            if i.get("itemType") == "event":
+                walk(i)
+                try:
+                    walk(c.connectapi(f"/calendar-service/event/{i['id']}"), ".EVENT")
+                except Exception as exc:
+                    print("KEY event detail failed", type(exc).__name__)
     end = (today + timedelta(days=6)).isoformat()
     sessions = []
     for t in plan.get("taskList") or []:
