@@ -10,6 +10,10 @@ on:
         description: 'Dry run — print the check in the log, do not send'
         type: boolean
         default: false
+      date:
+        description: 'Check as of this date, YYYY-MM-DD (testing)'
+        type: string
+        default: ''
 
 concurrency:
   group: plan-check
@@ -33,12 +37,13 @@ jobs:
 
       - name: Check plan against checkpoints
         run: |
-          if [ "${{ inputs.dry_run }}" = "true" ]; then
-            python plan_check.py --dry-run
-          else
-            python plan_check.py
-          fi
+          args=()
+          [ "$DRY_RUN" = "true" ] && args+=(--dry-run)
+          [ -n "$CHECK_DATE" ] && args+=(--date "$CHECK_DATE")
+          python plan_check.py "${args[@]}"
         env:
+          DRY_RUN:             ${{ inputs.dry_run }}
+          CHECK_DATE:          ${{ inputs.date }}
           GARMIN_EMAIL:        ${{ secrets.GARMIN_EMAIL }}
           GARMIN_PASSWORD:     ${{ secrets.GARMIN_PASSWORD }}
           GARMINTOKENS:        ${{ secrets.GARMINTOKENS }}
