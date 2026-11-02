@@ -1,0 +1,58 @@
+name: Weekly Plan Check
+
+on:
+  # Mondays 07:00 UTC (08:00–09:00 in Spain). Telegram only if the build lags.
+  schedule:
+    - cron: '0 7 * * 1'
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Dry run — print the check in the log, do not send'
+        type: boolean
+        default: false
+
+concurrency:
+  group: plan-check
+  cancel-in-progress: false
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: '3.13'   # garminconnect >=0.3.3 requires Python >=3.12
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Check plan against checkpoints
+        run: |
+          if [ "${{ inputs.dry_run }}" = "true" ]; then
+            python plan_check.py --dry-run
+          else
+            python plan_check.py
+          fi
+        env:
+          GARMIN_EMAIL:        ${{ secrets.GARMIN_EMAIL }}
+          GARMIN_PASSWORD:     ${{ secrets.GARMIN_PASSWORD }}
+          GARMINTOKENS:        ${{ secrets.GARMINTOKENS }}
+          TELEGRAM_BOT_TOKEN:  ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID:    ${{ secrets.TELEGRAM_CHAT_ID }}
+
+      - name: Alert on failure
+        if: failure()
+        env:
+          RUN_URL:             ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          TELEGRAM_BOT_TOKEN:  ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID:    ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          text="⚠️ Недельная проверка плана не выполнена из-за ошибки.
+          Лог: ${RUN_URL}"
+          curl -s -o /dev/null -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+            --data-urlencode "chat_id=${TELEGRAM_CHAT_ID}" --data-urlencode "text=${text}"

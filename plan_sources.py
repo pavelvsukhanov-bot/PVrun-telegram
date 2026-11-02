@@ -275,15 +275,15 @@ def garmin_plan(c, today: date) -> tuple[str, list[dict]]:
     return info, sessions
 
 
-def garmin_races(c, today: date) -> list[dict]:
-    """Race events from the Garmin calendar, from 15 days ago to 2 days ahead."""
-    months = {(d.year, d.month) for d in (today - timedelta(days=15), today, today + timedelta(days=2))}
+def garmin_races(c, today: date, back: int = 15, ahead: int = 2) -> list[dict]:
+    """Race events from the Garmin calendar, from `back` days ago to `ahead` days ahead."""
+    months = {(d.year, d.month) for d in (today + timedelta(days=k) for k in range(-back, ahead + 1))}
     races = {}
     for y, m in months:
         for i in (c.get_scheduled_workouts(y, m) or {}).get("calendarItems", []):
             if i.get("itemType") == "event" and i.get("isRace") and i.get("date"):
                 day = date.fromisoformat(i["date"])
-                if -15 <= (day - today).days <= 2:
+                if -back <= (day - today).days <= ahead:
                     races[(day, i.get("title"))] = {
                         "date": day, "title": i.get("title") or "старт",
                         "km": ((i.get("completionTarget") or {}).get("value") or 0) / 1000,
