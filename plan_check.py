@@ -34,8 +34,8 @@ load_dotenv()
 
 RACE_NAME = "Милан"
 RACE_DAY = date(2027, 4, 4)
-GOAL_S = 3 * 3600 + 45 * 60
-MP = 42195 / GOAL_S                    # m/s, goal marathon pace (≈5:20/km)
+GOAL_S = 3 * 3600 + 46 * 60           # the Garmin plan's goal (not exposed by its API): keep in sync
+MP = 42195 / GOAL_S                    # m/s, goal marathon pace (≈5:21/km)
 
 # (date, weekly km, long run km); flat after the last one, no check in the taper
 CHECKPOINTS = [
@@ -110,23 +110,6 @@ def upcoming(c, today: date) -> tuple[str, list[dict]]:
                   if ph.get("startDate", "") <= d <= ph.get("endDate", "")), "")
     week = (today - date.fromisoformat(plan["startDate"][:10])).days // 7 + 1
     info = f"{PHASE_RU.get(phase, phase.lower())}, нед. {week}/{plan.get('durationInWeeks')}"
-    import os
-    if os.environ.get("PLAN_KEYS"):     # TEMP: find the goal-time field
-        def walk(o, path=""):
-            if isinstance(o, dict):
-                for k, v in o.items():
-                    walk(v, f"{path}.{k}")
-            elif isinstance(o, (int, float)) and not isinstance(o, bool):
-                print("KEY", path, o if 3000 <= o <= 30000 else "")
-            else:
-                print("KEY", path)
-        for i in (c.get_scheduled_workouts(2027, 4) or {}).get("calendarItems", []):
-            if i.get("itemType") == "event":
-                walk(i)
-                try:
-                    walk(c.connectapi(f"/calendar-service/event/{i['id']}"), ".EVENT")
-                except Exception as exc:
-                    print("KEY event detail failed", type(exc).__name__)
     end = (today + timedelta(days=6)).isoformat()
     sessions = []
     for t in plan.get("taskList") or []:
