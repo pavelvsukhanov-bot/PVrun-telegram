@@ -110,6 +110,18 @@ def upcoming(c, today: date) -> tuple[str, list[dict]]:
                   if ph.get("startDate", "") <= d <= ph.get("endDate", "")), "")
     week = (today - date.fromisoformat(plan["startDate"][:10])).days // 7 + 1
     info = f"{PHASE_RU.get(phase, phase.lower())}, нед. {week}/{plan.get('durationInWeeks')}"
+    import os
+    if os.environ.get("PLAN_KEYS"):     # TEMP: find the goal-time field
+        def walk(o, path=""):
+            if isinstance(o, dict):
+                for k, v in o.items():
+                    if k not in ("taskList", "adaptivePlanPhases"):
+                        walk(v, f"{path}.{k}")
+            elif isinstance(o, (int, float)) and not isinstance(o, bool):
+                print("KEY", path, o if 3000 <= o <= 30000 else "")
+            else:
+                print("KEY", path)
+        walk(plan)
     end = (today + timedelta(days=6)).isoformat()
     sessions = []
     for t in plan.get("taskList") or []:

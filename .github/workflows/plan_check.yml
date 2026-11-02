@@ -44,6 +44,7 @@ jobs:
         env:
           DRY_RUN:             ${{ inputs.dry_run }}
           CHECK_DATE:          ${{ inputs.date }}
+          PLAN_KEYS:           '1'
           GARMIN_EMAIL:        ${{ secrets.GARMIN_EMAIL }}
           GARMIN_PASSWORD:     ${{ secrets.GARMIN_PASSWORD }}
           GARMINTOKENS:        ${{ secrets.GARMINTOKENS }}
